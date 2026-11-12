@@ -6,7 +6,7 @@
 
 import ctypes
 
-from PySide6.QtCore import Qt, QPointF, QRectF, QTimer
+from PySide6.QtCore import QPointF, QRect, QRectF, Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QPainter, QPen, QBrush, QRadialGradient
 from PySide6.QtWidgets import QWidget
 
@@ -103,11 +103,42 @@ class BoardOverlay(QWidget):
             return
         self.place(self.phys_rect)
 
+    def _mark_area(self, cands, grid):
+        """候选点覆盖的区域（含发光）。只重画这一块，比整窗重绘快得多。"""
+        if not grid or not cands:
+            return None
+        x0, y0, sx, sy = grid
+        s = self._scale()
+        rad = min(sx, sy) * float(self.cfg["dot_radius_ratio"]) * s * 1.7 + 4
+        area = None
+        for (i, j, _c, _l) in cands:
+            cx = (x0 + i * sx) * s
+            cy = (y0 + j * sy) * s
+            r = QRect(
+                int(cx - rad), int(cy - rad), int(rad * 2) + 1, int(rad * 2) + 1
+            )
+            area = r if area is None else area.united(r)
+        return area
+
     def set_state(self, grid, candidates, status_text=""):
+        # 内容没变就别重绘；变了也只重画点周围那几块
+        cands = list(candidates or [])
+        if (
+            self.grid == grid
+            and self.candidates == cands
+            and self.status_text == status_text
+        ):
+            return
+        old_area = self._mark_area(self.candidates, self.grid)
+        new_area = self._mark_area(cands, grid)
+        same_grid = self.grid == grid
         self.grid = grid
-        self.candidates = candidates or []
+        self.candidates = cands
         self.status_text = status_text
-        self.update()
+        if not same_grid or old_area is None or new_area is None:
+            self.update()
+        else:
+            self.update(old_area.united(new_area))
 
     def clear_points(self):
         self.candidates = []

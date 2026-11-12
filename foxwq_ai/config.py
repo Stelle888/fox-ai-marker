@@ -48,7 +48,10 @@ DEFAULTS = {
     # b20 比 b28 轻三倍，实时标注优先选它；想更强就换成 weights/ 里的 b28
     "katago_model": _pick_model(),
     "katago_config": os.path.join(_ROOT, "analysis.cfg"),
-    "max_visits": 400,          # 每个局面分析的 visits，越小越快（400 在这台机上约 0.3s）
+    "max_visits": 120,
+    # 每多少秒让引擎回报一次中间结果。必须写进请求，写进 analysis.cfg 无效。
+    # 调小 = 点更早出现、但会跟着搜索慢慢挪位置；调大 = 出现得晚，但一出现就比较准。
+    "report_every": 0.2,  # 每 0.2 秒回报一次中间结果（写进请求，不是 cfg）
     "analysis_threads": 2,      # 不改 cfg 时的兜底线程数提示（真值在 analysis.cfg）
     "komi": 7.5,
     "rules": "chinese",
@@ -57,7 +60,7 @@ DEFAULTS = {
     # ---------- 野狐窗口 ----------
     "window_title_keywords": ["野狐", "foxwq", "FoxGo", "围棋", "Fox"],
     "window_process": "foxwq.exe",
-    "capture_interval_ms": 300,   # 多久看一次棋盘
+    "capture_interval_ms": 150,   # 多久看一次棋盘
     "auto_calibrate": True,       # 自动找棋盘；失败时用手动 calibrate 值
 
     # ---------- 棋盘识别 ----------

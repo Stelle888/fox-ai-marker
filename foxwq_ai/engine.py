@@ -75,6 +75,7 @@ class KataGoEngine:
         self.results = {}          # id -> 解析后的结果
         self.lock = threading.Lock()
         self._seq = 0
+        self._cancelled = set()
         self.last_error = ""
         self.ready = False
         self._stderr_tail = []
@@ -116,6 +117,23 @@ class KataGoEngine:
         self._threads.append(t)
         return True
 
+    def cancel(self, rid):
+        """让引擎别算了。
+
+        不取消的话：每落一手都发一个新请求，旧请求还在后台跑，
+        一路积攒下来就是"越用越卡"。analysis 引擎支持用同一个 id 发 terminate。
+        """
+        if not self.alive or self.proc is None or not rid:
+            return
+        self._cancelled.add(rid)
+        try:
+            self.proc.stdin.write(
+                json.dumps({"id": rid, "action": "terminate"}) + "\n"
+            )
+            self.proc.stdin.flush()
+        except Exception:
+            pass
+
     def stop(self):
         self.alive = False
         if self.proc:
@@ -153,7 +171,9 @@ class KataGoEngine:
             if "id" in obj and "moveInfos" in obj:
                 self._handle_result(obj)
             elif "id" in obj and "isDuringSearch" not in obj:
-                # 错误回包
+                # 错误回包（自己主动取消的那条不算错）
+                if obj.get("id") in self._cancelled:
+                    continue
                 self.last_error = str(obj.get("error", obj))[:300]
                 self.log("[引擎]", self.last_error)
         self.alive = False
@@ -249,6 +269,9 @@ class KataGoEngine:
             "boardYSize": n,
             "analyzeTurns": [0],
             "maxVisits": int(visits or self.cfg["max_visits"]),
+            # 这个参数只能写在请求里 —— 放在 analysis.cfg 会被引擎当"未知配置项"忽略，
+            # 然后你就要一直等到整个搜索结束才有结果，看起来就像"卡住了"。
+            "reportDuringSearchEvery": float(self.cfg["report_every"]),
             "includeOwnership": False,
             "includeMovesOwnership": False,
         }

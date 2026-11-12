@@ -10,7 +10,7 @@ import numpy as np
 from PySide6.QtCore import QObject, QTimer
 
 from . import winfox
-from .boardreader import read_board
+from .boardreader import read_board, shift_reading
 from .engine import KataGoEngine
 from .overlay import BoardOverlay
 
@@ -68,6 +68,9 @@ class FoxAdvisor(QObject):
         self._board_lost_since = None
         self._quality = None
         self._warmed = False
+        self._warm_rid = None
+        self._fast_hits = 0
+        self._fast_miss = 0
 
         self.timer = QTimer(self)
         self.timer.setInterval(int(cfg["capture_interval_ms"]))
@@ -174,6 +177,10 @@ class FoxAdvisor(QObject):
 
         if not self.running:
             self._watchdog(now)
+            # 引擎一就绪就先把 GPU 预热掉（第一次推理要 5~6 秒），
+            # 别等用户点了开始、落了第一手、才发现还在预热
+            self._warmup()
+            self._notify()
             return
 
         # 窗口是在点"开始分析"那一刻锁定的，之后不再枚举；只有它真的没了才停
@@ -199,8 +206,9 @@ class FoxAdvisor(QObject):
             self._notify()
             return
 
-        img, rect = winfox.capture_window(self.hwnd)
-        if img is None or rect is None:
+        # 先只问窗口矩形（很便宜），再决定是抓"棋盘那一块"还是整窗
+        rect = winfox.get_rect(self.hwnd)
+        if not rect:
             self.status = "截图失败"
             self.overlay.hide()
             self._poll_engine()
@@ -208,18 +216,63 @@ class FoxAdvisor(QObject):
             return
 
         if rect != self.phys_rect:
+            # 窗口动过/缩放过，缓存的棋盘矩形和网格都作废
             self.phys_rect = rect
+            self._grid = None
+            self._rect_hint = None
             self.overlay.place(rect)
 
         self._warmup()
 
-        reading = read_board(
-            img,
-            n=self.cfg["board_size"],
-            tol=self.cfg["color_tolerance"],
-            manual_rect=self.cfg["manual_board"],
-            hint_rect=self._rect_hint,
-        )
+        n = self.cfg["board_size"]
+        reading = None
+
+        # 快路径：已经知道棋盘在哪，只 BitBlt 那一块（13ms，整窗 PrintWindow 要 136ms）
+        if self._grid is not None and self._rect_hint is not None:
+            bx, by, bw, bh = self._rect_hint
+            pad = 12
+            win_w = rect[2] - rect[0]
+            win_h = rect[3] - rect[1]
+            x0 = max(0, bx - pad)
+            y0 = max(0, by - pad)
+            x1 = min(win_w, bx + bw + pad)
+            y1 = min(win_h, by + bh + pad)
+            rw, rh = x1 - x0, y1 - y0
+            if rw >= 120 and rh >= 120:
+                sub = winfox.capture_region(self.hwnd, x0, y0, rw, rh)
+                if sub is not None and not winfox._looks_blank(sub):
+                    g = self._grid
+                    r = read_board(
+                        sub,
+                        n=n,
+                        hint_rect=(0, 0, rw, rh),
+                        grid=(g[0] - x0, g[1] - y0, g[2], g[3]),
+                    )
+                    if r is not None:
+                        reading = shift_reading(r, x0, y0)
+                        self._fast_hits += 1
+                    else:
+                        self._fast_miss += 1
+                else:
+                    self._fast_miss += 1
+
+        # 慢路径：整窗抓 + 全量找棋盘（第一次、或换页面/换尺寸时走这里）
+        if reading is None:
+            img, _rect = winfox.capture_window(self.hwnd)
+            if img is None:
+                self.status = "截图失败"
+                self.overlay.hide()
+                self._poll_engine()
+                self._notify()
+                return
+            reading = read_board(
+                img,
+                n=n,
+                tol=self.cfg["color_tolerance"],
+                manual_rect=self.cfg["manual_board"],
+                hint_rect=self._rect_hint,
+                grid=self._grid,
+            )
         if reading is None or reading.quality < 0.30:
             self.status = "没看到棋盘（可能不在对局页）"
             if self._board_lost_since is None:
@@ -244,7 +297,12 @@ class FoxAdvisor(QObject):
 
     # ------------------------------------------------------------------
     def _ingest(self, stones):
-        """把本帧局面并进对局状态（连续 2 帧一致才认，压掉偶发误判）。"""
+        """把本帧局面并进对局状态。
+
+        默认要连续 2 帧一致才认（150ms 一帧，压掉偶发误判）。
+        但"只多了一个子"是落子，这是最常见的动作、也是最需要快的动作，
+        所以单帧就先认下来；万一下一帧发现不对，下面那个"整盘重建"会把它纠正回来。
+        """
         if self._pending is not None and np.array_equal(stones, self._pending):
             self._pending_n += 1
         else:
@@ -252,6 +310,14 @@ class FoxAdvisor(QObject):
             self._pending_n = 1
 
         if self._pending_n < 2:
+            if self._pending is not None and self.last_stones is not None:
+                prev, cur = self.last_stones, self._pending
+                added = (cur > 0) & (prev == 0)
+                gone = (prev > 0) & (cur == 0)
+                if int(added.sum()) == 1 and int(gone.sum()) == 0:
+                    self._last_move_color = int(cur[added][0])
+                    self.last_stones = cur.copy()
+                    self._analyzed_stones = None
             return
 
         stable = self._pending
@@ -297,14 +363,21 @@ class FoxAdvisor(QObject):
 
     # ------------------------------------------------------------------
     def _warmup(self):
-        """引擎就绪后先空算一手：GPU 第一次推理要 5~6 秒，别让用户的第一手去等这个。"""
+        """引擎刚就绪、用户还没落子时，先空算一手把 GPU 烘热。
+
+        第一次推理要 3 秒多，之后每手才 80ms。所以这一发必须赶在"用户还没落子"的
+        空档里打出去；一旦有正式请求进来就把它掐掉，绝不能两个抢同一块卡
+        （实测两个一起跑，第一手反而要等 4 秒以上）。
+        """
         if self._warmed or not (self.engine.alive and self.engine.ready):
+            return
+        if self._current_rid:
             return
         self._warmed = True
         n = self.cfg["board_size"]
         empty = np.zeros((n, n), dtype=np.int8)
-        self.engine.analyze(empty, "B", visits=2)
-        self._log("预热一次推理")
+        self._warm_rid = self.engine.analyze(empty, "B", visits=1)
+        self._log("预热 GPU")
 
     def _maybe_analyze(self):
         if self.last_stones is None or self._analyzed_stones is not None:
@@ -316,6 +389,13 @@ class FoxAdvisor(QObject):
                 self.status = "引擎已停止：" + (self.engine.last_error or "未知原因")
             return
         player = self._next_player()
+        # 有正式请求了：预热立刻让路（它只是烘 GPU，不该占着算力）
+        if self._warm_rid:
+            self.engine.cancel(self._warm_rid)
+            self._warm_rid = None
+        # 再把上一个请求掐掉，不然每落一手就多一个还在跑的搜索，越攒越卡
+        if self._current_rid:
+            self.engine.cancel(self._current_rid)
         rid = self.engine.analyze(self.last_stones, player)
         if rid is None:
             self.status = "请求引擎失败：" + self.engine.last_error
@@ -345,6 +425,13 @@ class FoxAdvisor(QObject):
 
     def _pick_candidates(self, res):
         cands = [c for c in res["candidates"] if c.visits > 0]
+        if not cands:
+            return
+        # 中间结果刚起来时第一名可能才几个 visits，这时候画出来会乱跳。
+        # 但门槛不能太高：这台机器上 b18 大约 30ms 一个 visit，压到 24 就得等
+        # 0.7 秒以上才开始画面，跟"即时"就无关了。8 个 visits 已经能定住前三名。
+        if res.get("during") and cands[0].visits < 8:
+            return
         chosen = choose_candidates(
             cands,
             int(self.cfg["show_candidates"]),
@@ -361,7 +448,7 @@ class FoxAdvisor(QObject):
     def _render(self):
         if self._grid is None or self.phys_rect is None:
             return
-        self.overlay.place(self.phys_rect)
+        # 位置变化才重摆（place 内部也会判），每帧只更新点
         status = ""
         if self.cfg["show_winrate_text"] and self.cfg["show_status"]:
             status = self._status_line()
@@ -408,4 +495,6 @@ class FoxAdvisor(QObject):
             "running": self.running,
             "ready": bool(self.engine.ready and self.engine.alive),
             "visits": top["visits"] if top else 0,
+            "fast_hits": self._fast_hits,
+            "fast_miss": self._fast_miss,
         }

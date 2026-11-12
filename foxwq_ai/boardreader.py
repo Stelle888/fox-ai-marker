@@ -189,6 +189,26 @@ def _scan_grid(profile, n, p_lo, p_hi, p_steps, s_lo, s_hi, s_steps, tol=2):
     return best
 
 
+def _sample_points(luma, sat, gx0, gy0, spx, spy, n, offs, bounds):
+    """一次算完 n×n 个交叉点的环形均值。
+
+    原来是 361 次 Python 循环、每次再对几百个像素取均值，光这一层就吃掉近 100ms。
+    改成一次 fancy indexing：361×约300 个索引一次性取出来。
+    """
+    gx_lo, gx_hi, gy_lo, gy_hi = bounds
+    # ii 是行号（j），jj 是列号（i）；x 用列、y 用行，别接反
+    ii, jj = np.meshgrid(np.arange(n), np.arange(n), indexing="ij")
+    px = np.rint(gx0 + jj * spx).astype(np.int32)
+    py = np.rint(gy0 + ii * spy).astype(np.int32)
+    # 越界的采样点夹回来，不往外抓（棋盘外可能是白底/坐标字）
+    ys = np.clip(py[:, :, None] + offs[None, None, :, 0], gy_lo, gy_hi)
+    xs = np.clip(px[:, :, None] + offs[None, None, :, 1], gx_lo, gx_hi)
+    return (
+        luma[ys, xs].mean(axis=2).astype(np.float32),
+        sat[ys, xs].mean(axis=2).astype(np.float32),
+    )
+
+
 def _board_ground_color(luma, sat, gx0, gy0, sx, sy, n, rect=None):
     """估计棋盘底色（亮度 + 饱和度）。
 
@@ -197,32 +217,21 @@ def _board_ground_color(luma, sat, gx0, gy0, sx, sy, n, rect=None):
     直接拿 361 个交叉点的中位数当底色是不行的 —— 残局时棋子占了大半，会把底色带跑偏。
     """
     cell = (sx + sy) / 2.0
-    r = max(2, int(round(cell * 0.10)))
     H, W = luma.shape
-    lim = None
     if rect:
         rx, ry, rw, rh = rect
-        lim = (rx + 1, ry + 1, rx + rw - 1, ry + rh - 1)
+        x_lo, x_hi = max(0, rx + 1), min(W - 1, rx + rw - 1)
+        y_lo, y_hi = max(0, ry + 1), min(H - 1, ry + rh - 1)
+    else:
+        x_lo, x_hi, y_lo, y_hi = 0, W - 1, 0, H - 1
 
-    ls, ss = [], []
-    for j in range(n - 1):
-        for i in range(n - 1):
-            px = int(round(gx0 + (i + 0.5) * sx))
-            py = int(round(gy0 + (j + 0.5) * sy))
-            y0p, y1p = py - r, py + r + 1
-            x0p, x1p = px - r, px + r + 1
-            if lim:
-                x0p = max(x0p, lim[0])
-                y0p = max(y0p, lim[1])
-                x1p = min(x1p, lim[2])
-                y1p = min(y1p, lim[3])
-            y0p, x0p = max(0, y0p), max(0, x0p)
-            y1p, x1p = min(H, y1p), min(W, x1p)
-            if y1p <= y0p or x1p <= x0p:
-                continue
-            ls.append(float(np.median(luma[y0p:y1p, x0p:x1p])))
-            ss.append(float(np.median(sat[y0p:y1p, x0p:x1p])))
-    if not ls:
+    # 和 _sample_points 一样，一次性取 18×18 个格子中心，别循环
+    ii, jj = np.meshgrid(np.arange(n - 1), np.arange(n - 1), indexing="ij")
+    px = np.clip(np.rint(gx0 + (jj + 0.5) * sx).astype(np.int32), x_lo, x_hi)
+    py = np.clip(np.rint(gy0 + (ii + 0.5) * sy).astype(np.int32), y_lo, y_hi)
+    ls = luma[py, px].astype(np.float32)
+    ss = sat[py, px]
+    if ls.size == 0:
         return float("nan"), float("nan")
     return float(np.median(ls)), float(np.median(ss))
 
@@ -252,51 +261,76 @@ def _fit_period(profile, n, rough_p, p_tol=0.16, phase_steps=48):
     return fine if fine is not None else best
 
 
-def _read_rect(img, rect, n=19):
-    """在给定矩形里拟合网格并判黑白。失败返回 None。"""
+def _read_rect(img, rect, n=19, grid=None):
+    """在给定矩形里读盘，失败返回 None。
+
+    grid 是上一次拟合好的 (gx0, gy0, sx, sy)。给了就直接用，跳过"找棋盘+拟合网格"，
+    这一步占了原来每帧 400ms 里的大头；只要窗口没动过，网格就不会变。
+    """
     x, y, w, h = rect
     if w < 80 or h < 80:
         return None
 
     gray = _to_gray(img)
-    # 内缩一点，避免把棋盘外框/阴影算进投影
-    mx = int(w * 0.02)
-    my = int(h * 0.02)
-    ix0, iy0 = x + mx, y + my
-    ix1, iy1 = x + w - mx, y + h - my
-    if ix1 - ix0 < 60 or iy1 - iy0 < 60:
-        return None
+    luma = gray
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    sat = hsv[:, :, 1].astype(np.float32) / 255.0
 
-    col, row, _bg = _darkness_profile(gray, ix0, ix1, iy0, iy1)
-    rough_px = w / (n + 0.55)   # 经验估计：外框比网格略宽一点
-    rough_py = h / (n + 0.55)
+    ratio_x = ratio_y = 8.0
+    quality = 1.0
+    reused = False
+    if grid is not None:
+        gx0, gy0, spx, spy = (float(v) for v in grid)
+        # 缓存网格必须还落在矩形里，否则当它失效
+        if (
+            spx >= 4 and spy >= 4
+            and x - 10 <= gx0 <= x + w
+            and y - 10 <= gy0 <= y + h
+            and gx0 + (n - 1) * spx <= x + w + 10
+            and gy0 + (n - 1) * spy <= y + h + 10
+        ):
+            reused = True
+        else:
+            grid = None
 
-    fx = _fit_period(col, n, rough_px)
-    fy = _fit_period(row, n, rough_py)
-    if fx is None or fy is None:
-        return None
-    sx0, spx, sxc = fx
-    sy0, spy, syc = fy
+    if not reused:
+        # 内缩一点，避免把棋盘外框/阴影算进投影
+        mx = int(w * 0.02)
+        my = int(h * 0.02)
+        ix0, iy0 = x + mx, y + my
+        ix1, iy1 = x + w - mx, y + h - my
+        if ix1 - ix0 < 60 or iy1 - iy0 < 60:
+            return None
 
-    # 棋盘网格横竖格宽必须接近（真野狐的底图是 415x380，拉伸后能差到 9%，
-    # 所以给 15% 的富裕；靠这个能挡掉"登录框按钮排成等距"这类假棋盘，那个差 36%）。
-    if abs(spx - spy) / max(spx, spy) > 0.15:
-        return None
+        col, row, _bg = _darkness_profile(gray, ix0, ix1, iy0, iy1)
+        rough_px = w / (n + 0.55)   # 经验估计：外框比网格略宽一点
+        rough_py = h / (n + 0.55)
 
-    # 质量分：19 条线上的平均暗度，比"随便挑 19 个位置"高多少倍
-    base_x = float(np.median(col))
-    base_y = float(np.median(row))
-    ratio_x = (sxc / n) / (base_x + 1.0)
-    ratio_y = (syc / n) / (base_y + 1.0)
-    if ratio_x < 4.0 or ratio_y < 4.0:
-        return None  # 没有明显的等距网格线，不是棋盘
-    quality = float(np.clip(min(ratio_x, ratio_y) / 8.0, 0, 1))
+        fx = _fit_period(col, n, rough_px)
+        fy = _fit_period(row, n, rough_py)
+        if fx is None or fy is None:
+            return None
+        sx0, spx, sxc = fx
+        sy0, spy, syc = fy
 
-    gx0 = ix0 + sx0
-    gy0 = iy0 + sy0
+        # 棋盘网格横竖格宽必须接近（真野狐的底图是 415x380，拉伸后能差到 9%，
+        # 所以给 15% 的富裕；靠这个能挡掉"登录框按钮排成等距"这类假棋盘，那个差 36%）。
+        if abs(spx - spy) / max(spx, spy) > 0.15:
+            return None
 
-    stones = np.zeros((n, n), dtype=np.int8)
+        # 质量分：19 条线上的平均暗度，比"随便挑 19 个位置"高多少倍
+        base_x = float(np.median(col))
+        base_y = float(np.median(row))
+        ratio_x = (sxc / n) / (base_x + 1.0)
+        ratio_y = (syc / n) / (base_y + 1.0)
+        if ratio_x < 4.0 or ratio_y < 4.0:
+            return None  # 没有明显的等距网格线，不是棋盘
+        quality = float(np.clip(min(ratio_x, ratio_y) / 8.0, 0, 1))
+        gx0 = ix0 + sx0
+        gy0 = iy0 + sy0
+
     cell = max(4.0, (spx + spy) / 2.0)
+    stones = np.zeros((n, n), dtype=np.int8)
 
     # 环形采样：半径 0.18~0.34 格的一圈。
     # 为什么不用实心圆：子中心常有"最后一手"的小三角/圆点标记，
@@ -319,24 +353,10 @@ def _read_rect(img, rect, n=19):
     gx_hi = max(gx_hi, gx_lo + 1)
     gy_hi = max(gy_hi, gy_lo + 1)
 
-    luma = gray
-    # 只看亮度不够：野狐的木纹底很亮（灰度 226 左右），白子才 244，差 8%，
-    # 纯亮度阈值会把白子当成空点。补上饱和度：木纹有颜色（S≈0.3），白子是中性灰（S≈0）。
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    sat = hsv[:, :, 1].astype(np.float32) / 255.0
-    samples = np.zeros((n, n), dtype=np.float32)
-    sats = np.zeros((n, n), dtype=np.float32)
-    for j in range(n):
-        py = int(round(gy0 + j * spy))
-        for i in range(n):
-            px = int(round(gx0 + i * spx))
-            # 越界的采样点夹回来，不往外抓（棋盘外可能是白底/坐标字）
-            ys = np.clip(py + offs[:, 0], gy_lo, gy_hi)
-            xs = np.clip(px + offs[:, 1], gx_lo, gx_hi)
-            samples[j, i] = float(luma[ys, xs].mean())
-            sats[j, i] = float(sat[ys, xs].mean())
+    luma_gray = gray
+    samples, sats = _sample_points(luma_gray, sat, gx0, gy0, spx, spy, n, offs, (gx_lo, gx_hi, gy_lo, gy_hi))
 
-    bg_level, bg_sat = _board_ground_color(luma, sat, gx0, gy0, spx, spy, n, rect=(x, y, w, h))
+    bg_level, bg_sat = _board_ground_color(luma_gray, sat, gx0, gy0, spx, spy, n, rect=(x, y, w, h))
     if not np.isfinite(bg_level) or bg_level <= 1:
         return None
 
@@ -365,14 +385,43 @@ def _read_rect(img, rect, n=19):
     )
 
 
-def read_board(img, n=19, tol=60, manual_rect=None, hint_rect=None):
+def shift_reading(reading, dx, dy):
+    """把"局部截图"里读出的结果平移回整窗坐标。"""
+    if reading is None or not dx and not dy:
+        return reading
+    gx, gy, sx, sy = reading.grid
+    rx, ry, rw, rh = reading.rect
+    return BoardReading(
+        stones=reading.stones,
+        grid=(gx + dx, gy + dy, sx, sy),
+        rect=(rx + dx, ry + dy, rw, rh),
+        quality=reading.quality,
+        bg_color=reading.bg_color,
+        note=reading.note,
+    )
+
+
+def read_board(img, n=19, tol=60, manual_rect=None, hint_rect=None, grid=None):
     """读一张整窗截图。返回 BoardReading；找不到棋盘返回 None。
 
     manual_rect: 用户手填的棋盘矩形（最高优先级）
-    hint_rect:   上一次成功识别的矩形，棋盘位置通常不变，满盘时靠它兜底
+    hint_rect:   上一次成功识别的矩形
+    grid:        上一次拟合出的网格。和 hint_rect 一起给、且还能用时直接复用，
+                 跳过"找矩形 + 拟合网格"（这是每帧最贵的一步），一帧能省 90ms 以上。
+
+    快路径失败（换页面、窗口动了）会自动退回全量搜索。
     """
     if img is None or img.size == 0:
         return None
+
+    # 快路径：窗口没动过，网格还能用
+    if grid is not None and hint_rect is not None:
+        try:
+            r = _read_rect(img, tuple(int(v) for v in hint_rect), n=n, grid=grid)
+        except Exception:
+            r = None
+        if r is not None:
+            return r
 
     cands = []
     for r in (manual_rect, hint_rect):

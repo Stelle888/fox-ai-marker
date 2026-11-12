@@ -182,17 +182,88 @@ def _capture_screen(rect):
     return np.array(img.convert("RGB"))[:, :, ::-1].copy()  # RGB -> BGR
 
 
+class _BMIH(ctypes.Structure):
+    _fields_ = [
+        ("biSize", wt.DWORD),
+        ("biWidth", wt.LONG),
+        ("biHeight", wt.LONG),
+        ("biPlanes", wt.WORD),
+        ("biBitCount", wt.WORD),
+        ("biCompression", wt.DWORD),
+        ("biSizeImage", wt.DWORD),
+        ("biXPelsPerMeter", wt.LONG),
+        ("biYPelsPerMeter", wt.LONG),
+        ("biClrUsed", wt.DWORD),
+        ("biClrImportant", wt.DWORD),
+    ]
+
+
+def capture_region(hwnd, x, y, w, h):
+    """只抓窗口里的一块（BitBlt 从窗口 DC，坐标就是整窗截图坐标系）。
+
+    为什么值得单独写一条：PrintWindow 抓整个 1920x1083 要 130+ ms，
+    BitBlt 抓棋盘那一块（约 960x950）只要 13 ms，快一个数量级。
+    代价是只对 GDI 自绘的窗口有效 —— 野狐正好是。
+    抓出来是黑的就返回 None，让调用方退回 PrintWindow。
+    """
+    if w <= 0 or h <= 0:
+        return None
+    gdi32 = ctypes.windll.gdi32
+    hdc = user32.GetWindowDC(hwnd)
+    if not hdc:
+        return None
+    mem = None
+    bmp = None
+    old = None
+    try:
+        mem = gdi32.CreateCompatibleDC(hdc)
+        bmp = gdi32.CreateCompatibleBitmap(hdc, w, h)
+        if not mem or not bmp:
+            return None
+        old = gdi32.SelectObject(mem, bmp)
+        if not gdi32.BitBlt(mem, 0, 0, w, h, hdc, x, y, 0x00CC0020):
+            return None
+        bi = _BMIH()
+        bi.biSize = ctypes.sizeof(_BMIH)
+        bi.biWidth = w
+        bi.biHeight = -h          # 负数 = 自上而下，正好是 BGR 的顺序
+        bi.biPlanes = 1
+        bi.biBitCount = 32
+        buf = np.zeros((h, w, 4), dtype=np.uint8)
+        rows = gdi32.GetDIBits(
+            mem, bmp, 0, h, ctypes.c_void_p(buf.ctypes.data), ctypes.byref(bi), 0
+        )
+        if not rows:
+            return None
+        return buf[:, :, :3].copy()
+    finally:
+        try:
+            if mem and old:
+                gdi32.SelectObject(mem, old)
+            if bmp:
+                gdi32.DeleteObject(bmp)
+            if mem:
+                gdi32.DeleteDC(mem)
+            user32.ReleaseDC(hwnd, hdc)
+        except Exception:
+            pass
+
+
 def _looks_blank(img):
     """判断这张图是不是"没抓到"。
 
     野狐是自绘界面，PrintWindow 偶尔会返回一整块黑（实测过：整列都是 (0,35,34)），
     这时宁可不识别，也别拿它去误导棋盘拟合。
+
+    注意要抽样：对一整张 1920x1083 的图直接算 std 要 80~100ms，
+    而这一步只是"判定"，抽 1/36 的像素完全够用（实测 0.5ms）。
     """
     if img is None or img.size == 0:
         return True
-    if float(img.std()) < 3.0:
+    sample = img[::6, ::6]
+    if float(sample.std()) < 3.0:
         return True
-    gray_mean = img.mean(axis=2)
+    gray_mean = sample.mean(axis=2)
     if float((gray_mean < 20).mean()) > 0.35:
         return True   # 正常对局页近黑像素 < 5%
     return False
