@@ -12,7 +12,7 @@ from PySide6.QtCore import QObject, QTimer
 
 from . import winfox
 from .boardreader import read_board, shift_reading
-from .engine import KataGoEngine
+from .gtp import KataGoGtp
 from .overlay import BoardOverlay
 
 COLOR_NAMES = ["一选", "二选", "三选"]
@@ -42,7 +42,7 @@ class FoxAdvisor(QObject):
         self.cfg = cfg
         self.on_update = on_update or (lambda *a, **k: None)
         self.overlay = BoardOverlay(cfg)
-        self.engine = KataGoEngine(cfg, log=self._log)
+        self.engine = KataGoGtp(cfg, log=self._log)
 
         self.hwnd = None
         self.phys_rect = None
@@ -68,10 +68,11 @@ class FoxAdvisor(QObject):
         self._fps = 0.0
         self._board_lost_since = None
         self._quality = None
-        self._warmed = False
-        self._warm_rid = None
         self._last_change = 0.0
         self._last_sig = None
+        self._last_gen = -1
+        self._engine_inited = False
+        self._synced = False
         self._log_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "fox-ai.log")
         self._fast_hits = 0
         self._fast_miss = 0
@@ -152,6 +153,7 @@ class FoxAdvisor(QObject):
         self._current_state = None
         self._last_cands = []
         self._grid = None
+        self._last_gen = -1
         self.phys_rect = None
 
     def recalibrate(self):
@@ -171,7 +173,7 @@ class FoxAdvisor(QObject):
             return
         self._last_restart = now
         self._log("引擎不在了，重新启动…")
-        self.engine = KataGoEngine(self.cfg, log=self._log)
+        self.engine = KataGoGtp(self.cfg, log=self._log)
         if not self.engine.start():
             self.status = "引擎重启失败：" + self.engine.last_error
         else:
@@ -191,7 +193,6 @@ class FoxAdvisor(QObject):
             self._watchdog(now)
             # 引擎一就绪就先把 GPU 预热掉（第一次推理要 5~6 秒），
             # 别等用户点了开始、落了第一手、才发现还在预热
-            self._warmup()
             self._notify()
             return
 
@@ -204,7 +205,6 @@ class FoxAdvisor(QObject):
         if winfox.is_minimized(self.hwnd):
             self.status = "野狐已最小化"
             self.overlay.hide()
-            self._poll_engine()
             self._notify()
             return
 
@@ -218,7 +218,6 @@ class FoxAdvisor(QObject):
         if self.cfg["overlay_hide_when_other"] and not in_front:
             self.overlay.hide()
             self.status = "野狐不在前台，切回去就继续"
-            self._poll_engine()
             self._notify()
             return
 
@@ -227,7 +226,6 @@ class FoxAdvisor(QObject):
         if not rect:
             self.status = "截图失败"
             self.overlay.hide()
-            self._poll_engine()
             self._notify()
             return
 
@@ -238,7 +236,6 @@ class FoxAdvisor(QObject):
             self._rect_hint = None
             self.overlay.place(rect)
 
-        self._warmup()
 
         n = self.cfg["board_size"]
         reading = None
@@ -278,7 +275,6 @@ class FoxAdvisor(QObject):
             if img is None:
                 self.status = "截图失败"
                 self.overlay.hide()
-                self._poll_engine()
                 self._notify()
                 return
             reading = read_board(
@@ -308,10 +304,29 @@ class FoxAdvisor(QObject):
         self._rect_hint = reading.rect
         self._grid = reading.grid
 
-        self._ingest(reading.stones)
+        changed = self._ingest(reading.stones)
 
-        self._maybe_analyze()
-        self._poll_engine()
+        # 引擎要加载十几秒。没就绪之前发过去的 GTP 命令都是丢的，
+        # 所以 setup / 开持续分析 / 首次同步都压到"确认 ready"这一刻做。
+        if self.engine.ready and not self._engine_inited:
+            self.engine.setup(self.cfg["komi"], self.cfg["rules"])
+            self.engine.begin_analyze()
+            self._engine_inited = True
+            self._synced = False
+            self._trace("引擎就绪，开始持续分析")
+
+        if changed or (self.engine.ready and not self._synced):
+            n_add = self.engine.sync_board(self.last_stones, self._next_player())
+            if self.engine.ready:
+                self._synced = True
+            if n_add:
+                self.status = f"分析中…（{'黑' if self._next_player() == 'B' else '白'}方）"
+
+        cands, gen, _wr = self.engine.latest()
+        if gen != self._last_gen:
+            self._last_gen = gen
+            self._pick_candidates(cands)
+
         self._render()
         self._notify()
 
@@ -328,7 +343,7 @@ class FoxAdvisor(QObject):
         """
         sig = stones > 0
         if self.last_stones is not None and np.array_equal(sig, self._last_sig):
-            return
+            return False
 
         nb = int((stones == 1).sum())
         nw = int((stones == 2).sum())
@@ -344,9 +359,9 @@ class FoxAdvisor(QObject):
 
         self.last_stones = stones.copy()
         self._last_sig = sig
-        self._analyzed_stones = None
         self._last_change = time.time()
         self._trace(f"局面: 黑{nb} 白{nw}（上一帧 {prev_n} 子，现在 {nb + nw} 子）")
+        return True
 
     def _next_player(self):
         if self.last_stones is None:
@@ -360,110 +375,13 @@ class FoxAdvisor(QObject):
         # 让子或识别抖动：按黑多算，宁可给白方推荐
         return "W" if black > white else "B"
 
-    # ------------------------------------------------------------------
-    def _warmup(self):
-        """引擎刚就绪、用户还没落子时，先空算一手把 GPU 烘热。
-
-        第一次推理要 3 秒多，之后每手才 80ms。所以这一发必须赶在"用户还没落子"的
-        空档里打出去；一旦有正式请求进来就把它掐掉，绝不能两个抢同一块卡
-        （实测两个一起跑，第一手反而要等 4 秒以上）。
-        """
-        if self._warmed or not (self.engine.alive and self.engine.ready):
-            return
-        if self._current_rid:
-            return
-        self._warmed = True
-        n = self.cfg["board_size"]
-        empty = np.zeros((n, n), dtype=np.int8)
-        self._warm_rid = self.engine.analyze(empty, "B", visits=1)
-        self._log("预热 GPU")
-
-    def _maybe_analyze(self):
-        if self.last_stones is None:
-            return
-        # 这个局面已经问过了就别再问。用内容比较，别用"问过没有"——
-        # 落子动画期间局面会被反复改回来，用标志位会把请求全废掉。
-        if self._analyzed_stones is not None and np.array_equal(
-            self._analyzed_stones, self.last_stones
-        ):
-            # 问过了，但万一那条请求死在半路（被取消、引擎抽风），
-            # 就会永远等下去。这里兜一个底：超过 2.5s 还没结果就重发一次。
-            if self._current_rid and time.time() - self._analysis_start > 5.0:
-                self._trace(f"请求 {self._current_rid} 超过 5s 没结果，重发")
-                self.engine.cancel(self._current_rid)
-                self._current_rid = None
-                self._analyzed_stones = None
-            else:
-                return
-        if not (self.engine.alive and self.engine.ready):
-            if self.engine.alive:
-                self.status = "引擎加载中…"
-            else:
-                self.status = "引擎已停止：" + (self.engine.last_error or "未知原因")
-            return
-        # 只等 50ms。识别已经稳定了，这个纯粹是兜一下落子动画的第一帧，
-        # 不能大 —— 大一点你落子的手感就变成"等一下才出点"。
-        if time.time() - self._last_change < 0.05:
-            return
-        player = self._next_player()
-        # 有正式请求了：预热立刻让路（它只是烘 GPU，不该占着算力）
-        if self._warm_rid:
-            self.engine.cancel(self._warm_rid)
-            self._warm_rid = None
-        # 再把上一个请求掐掉，不然每落一手就多一个还在跑的搜索，越攒越卡
-        if self._current_rid:
-            self.engine.cancel(self._current_rid)
-        rid = self.engine.analyze(self.last_stones, player)
-        if rid is None:
-            self.status = "请求引擎失败：" + self.engine.last_error
-            self._trace("请求失败: " + (self.engine.last_error or "?"))
-            return
-        self._current_rid = rid
-        self._analyzed_stones = self.last_stones.copy()
-        self._analysis_start = time.time()
-        self._current_state = None
-        n = self.cfg["board_size"]
-        _ = n
-        # 故意不清空 _last_cands：让旧点先留在棋盘上，新结果一到就覆盖。
-        # 清空的话棋盘会空出一二百毫秒，看着就像"标注掉了"。
-        self.status = f"分析中…（{'黑' if player == 'B' else '白'}方）"
-        self._trace(f"发请求 {rid}（轮到{'黑' if player == 'B' else '白'}，"
-                    f"盘上 {int((self.last_stones > 0).sum())} 子）")
-
-    def _poll_engine(self):
-        if not self._current_rid:
-            return
-        res = self.engine.get(self._current_rid)
-        if not res:
-            return
-        # 已经有最终结果了就不再被中间结果覆盖
-        if self._current_state is not None and not self._current_state["during"]:
-            return
-        first = self._current_state is None
-        was_during = self._current_state is not None and self._current_state["during"]
-        self._current_state = res
-        self._pick_candidates(res)
-        if first:
-            self._trace(f"{self._current_rid} 首个结果: {len(res['candidates'])} 候选 "
-                        f"-> 标了 {len(self._last_cands)} 个")
-        if not res["during"]:
-            if was_during or first:
-                self._trace(f"{self._current_rid} 最终结果 -> 标了 {len(self._last_cands)} 个")
-                self.status = f"已出结果（{'黑' if self._next_player() == 'B' else '白'}方）"
-            # 这一手算完了，把 rid 放掉：否则 5 秒后会被超时逻辑当成"卡死"重发一遍
-            self._current_rid = None
-
-    def _pick_candidates(self, res):
-        cands = [c for c in res["candidates"] if c.visits > 0]
+    def _pick_candidates(self, cands_list):
+        # GTP 持续分析给的候选是"按 move 累积"的，只有一个 visit 的先不画，
+        # 免得刚发 `play` 那一瞬间拿搜索树里还没站稳的点去闪一下。
+        cands = [c for c in cands_list if c.visits >= 2]
         if not cands:
             return
-        # 中间结果刚起来时第一名可能才几个 visits，这时候画出来会乱跳。
-        # 门槛必须极低。这台机器上 b18c384nbt 首手能慢到 100ms 一个 visit，
-        # 压到 8 就意味着第一个点要等 0.8 秒以上 —— 实测直接被挡成"不出点"。
-        # 宁可让点先跳两下，也不能让它不出现。
-        if res.get("during") and cands[0].visits < 2:
-            self._trace(f"  中间结果太浅（{cands[0].visits} visits），先不画")
-            return
+        cands.sort(key=lambda c: -c.visits)
         chosen = choose_candidates(
             cands,
             int(self.cfg["show_candidates"]),
@@ -487,17 +405,14 @@ class FoxAdvisor(QObject):
         self.overlay.set_state(self._grid, self._last_cands, status)
 
     def _status_line(self):
-        if not self._current_state:
+        cands, _gen, wr = self.engine.latest()
+        if not cands:
             return self.status
-        st = self._current_state
         player = self._next_player()
-        wr = st.get("root_winrate")
         side = "黑" if player == "B" else "白"
         wr_txt = f"{wr * 100:.1f}%" if isinstance(wr, (int, float)) else "?"
-        dt = st["time"] - self._analysis_start
-        first = st["candidates"][0] if st["candidates"] else None
-        v = first.visits if first else 0
-        return f"{side}方 胜率 {wr_txt}  {v}v  {dt:.2f}s  {'点' * len(self._last_cands)}"
+        v = max(c.visits for c in cands)
+        return f"{side}方 胜率 {wr_txt}  {v}v"
 
     # ------------------------------------------------------------------
     def _notify(self):
@@ -508,10 +423,10 @@ class FoxAdvisor(QObject):
 
     # ------------------------------------------------------------------
     def snapshot(self):
-        st = self._current_state
+        cands_now = self.engine.latest()[0]
         top = None
-        if st and st.get("candidates"):
-            c = st["candidates"][0]
+        if cands_now:
+            c = max(cands_now, key=lambda x: x.visits)
             top = {"move": c.move, "visits": c.visits}
         return {
             "status": self.status,
