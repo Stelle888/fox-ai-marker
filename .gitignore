@@ -1,0 +1,25 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ---- 配置（各人机器不一样，不要提交）----
+config.json
+
+# ---- 二进制和权重（体积太大，走 Release 或 scripts/setup.ps1）----
+katago/
+weights/
+*.bin.gz
+*.zip
+
+# ---- 运行时产物 ----
+logs/
+*.log
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
