@@ -69,6 +69,7 @@ class FoxAdvisor(QObject):
         self._quality = None
         self._warmed = False
         self._warm_rid = None
+        self._last_change = 0.0
         self._fast_hits = 0
         self._fast_miss = 0
 
@@ -280,6 +281,10 @@ class FoxAdvisor(QObject):
             elif now - self._board_lost_since > 1.5 and self._last_cands:
                 self.overlay.clear_points()
                 self._last_cands = []
+                # 丢掉"已分析过"的标记：棋盘回来以后要重新问一次，
+                # 否则局面没变就再也不会发请求，点永远不回来
+                self._analyzed_stones = None
+                self._current_rid = None
             self._notify()
             return
 
@@ -300,8 +305,11 @@ class FoxAdvisor(QObject):
         """把本帧局面并进对局状态。
 
         默认要连续 2 帧一致才认（150ms 一帧，压掉偶发误判）。
-        但"只多了一个子"是落子，这是最常见的动作、也是最需要快的动作，
-        所以单帧就先认下来；万一下一帧发现不对，下面那个"整盘重建"会把它纠正回来。
+        但"只多了一个子"是落子，是最常见也最需要快的动作，所以单帧就先认。
+
+        关键是 changed 这个判断：野狐落子有淡入动画，连着好几帧读出来的东西
+        都不一样。如果每帧都当成"新局面"，就会疯狂取消 + 重发请求，
+        最后一个结果都等不到 —— 表现就是"开局有标注，落了子就不刷新了"。
         """
         if self._pending is not None and np.array_equal(stones, self._pending):
             self._pending_n += 1
@@ -309,8 +317,12 @@ class FoxAdvisor(QObject):
             self._pending = stones.copy()
             self._pending_n = 1
 
+        changed = self.last_stones is None or not np.array_equal(
+            self._pending, self.last_stones
+        )
+
         if self._pending_n < 2:
-            if self._pending is not None and self.last_stones is not None:
+            if changed and self.last_stones is not None:
                 prev, cur = self.last_stones, self._pending
                 added = (cur > 0) & (prev == 0)
                 gone = (prev > 0) & (cur == 0)
@@ -318,11 +330,13 @@ class FoxAdvisor(QObject):
                     self._last_move_color = int(cur[added][0])
                     self.last_stones = cur.copy()
                     self._analyzed_stones = None
+                    self._last_change = time.time()
             return
 
         stable = self._pending
         if self.last_stones is None:
-            self.last_stones = stable
+            self.last_stones = stable.copy()
+            self._last_change = time.time()
             return
         if np.array_equal(stable, self.last_stones):
             return
@@ -333,21 +347,22 @@ class FoxAdvisor(QObject):
         n_add = int(added.sum())
         n_rm = int(removed.sum())
 
-        if n_add == 1:
-            color = int(cur[added][0])
-            self._last_move_color = color
-            self.last_stones = stable
+        if n_add == 1 and n_rm == 0:
+            self._last_move_color = int(cur[added][0])
+            self.last_stones = stable.copy()
             self._analyzed_stones = None
+            self._last_change = time.time()
             return
 
         # 悔棋 / 新对局 / 切换棋盘：整盘重建
         self._log(f"局面重建（新增 {n_add} 子，消失 {n_rm} 子）")
-        self.last_stones = stable
+        self.last_stones = stable.copy()
         self._analyzed_stones = None
         self._current_rid = None
         self._last_cands = []
         # 最后落子颜色未知，用子数推断下一手（黑白子数相等时轮黑）
         self._last_move_color = 0
+        self._last_change = time.time()
 
     def _next_player(self):
         if self.last_stones is None:
@@ -380,13 +395,22 @@ class FoxAdvisor(QObject):
         self._log("预热 GPU")
 
     def _maybe_analyze(self):
-        if self.last_stones is None or self._analyzed_stones is not None:
+        if self.last_stones is None:
+            return
+        # 这个局面已经问过了就别再问。用内容比较，别用"问过没有"——
+        # 落子动画期间局面会被反复改回来，用标志位会把请求全废掉。
+        if self._analyzed_stones is not None and np.array_equal(
+            self._analyzed_stones, self.last_stones
+        ):
             return
         if not (self.engine.alive and self.engine.ready):
             if self.engine.alive:
                 self.status = "引擎加载中…"
             else:
                 self.status = "引擎已停止：" + (self.engine.last_error or "未知原因")
+            return
+        # 局面刚变，让它先稳住（落子动画期间识别会抖），别急着问
+        if time.time() - self._last_change < 0.10:
             return
         player = self._next_player()
         # 有正式请求了：预热立刻让路（它只是烘 GPU，不该占着算力）
@@ -404,7 +428,8 @@ class FoxAdvisor(QObject):
         self._analyzed_stones = self.last_stones.copy()
         self._analysis_start = time.time()
         self._current_state = None
-        self._last_cands = []
+        # 故意不清空 _last_cands：让旧点先留在棋盘上，新结果一到就覆盖。
+        # 清空的话棋盘会空出一二百毫秒，看着就像"标注掉了"。
         self.status = f"分析中…（{'黑' if player == 'B' else '白'}方）"
 
     def _poll_engine(self):

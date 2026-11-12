@@ -10,6 +10,11 @@
 import numpy as np
 import cv2
 
+# 判子参数（思路来自 readboard / LizzieYzy 的 BoardOCR）
+NEUTRAL_SPREAD = 50   # 三通道两两差都小于这个 → 算"中性灰"（彩色木纹底会被排掉）
+BLACK_RATIO = 0.5     # 中性像素里"够黑"的占比到这么多 → 黑子
+WHITE_RATIO = 0.5     # "够白"的占比到这么多 → 白子
+
 
 # 结果容器
 class BoardReading:
@@ -189,11 +194,17 @@ def _scan_grid(profile, n, p_lo, p_hi, p_steps, s_lo, s_hi, s_steps, tol=2):
     return best
 
 
-def _sample_points(luma, sat, gx0, gy0, spx, spy, n, offs, bounds):
-    """一次算完 n×n 个交叉点的环形均值。
+def _sample_points(luma, sat, gx0, gy0, spx, spy, n, offs, bounds, img=None, cuts=None):
+    """一次算完 n×n 个交叉点的环形统计。
+
+    除了亮度/饱和度均值，还按 readboard（LizzieYzy）那套思路统计两个占比：
+      - 中性灰像素（三通道两两差 < 50 —— 排除彩色木纹底）
+      - 其中够黑的占比、够白的占比
+    用"占比"而不是"均值"，是因为均值会被环里混进来的一圈底色稀释，
+    而占比不受影响：白子那圈里白像素就是压倒性多数。
 
     原来是 361 次 Python 循环、每次再对几百个像素取均值，光这一层就吃掉近 100ms。
-    改成一次 fancy indexing：361×约300 个索引一次性取出来。
+    现在一次 fancy indexing 全算完。
     """
     gx_lo, gx_hi, gy_lo, gy_hi = bounds
     # ii 是行号（j），jj 是列号（i）；x 用列、y 用行，别接反
@@ -203,10 +214,32 @@ def _sample_points(luma, sat, gx0, gy0, spx, spy, n, offs, bounds):
     # 越界的采样点夹回来，不往外抓（棋盘外可能是白底/坐标字）
     ys = np.clip(py[:, :, None] + offs[None, None, :, 0], gy_lo, gy_hi)
     xs = np.clip(px[:, :, None] + offs[None, None, :, 1], gx_lo, gx_hi)
-    return (
-        luma[ys, xs].mean(axis=2).astype(np.float32),
-        sat[ys, xs].mean(axis=2).astype(np.float32),
-    )
+
+    samples = luma[ys, xs].mean(axis=2).astype(np.float32)
+    sats = sat[ys, xs].mean(axis=2).astype(np.float32)
+
+    black_frac = white_frac = None
+    if img is not None and cuts is not None:
+        black_cut, white_cut = cuts
+        # 只把"要采样的那些像素"取出来分类（361×约300 个），
+        # 不要对整张 1900x1000 的图做四次比较 —— 那样一帧要多花 40ms。
+        px_rgb = img[ys, xs].astype(np.int16)      # (n, n, K, 3)
+        pb = px_rgb[..., 0]
+        pg = px_rgb[..., 1]
+        pr = px_rgb[..., 2]
+        # 中性灰：三通道彼此接近。彩色底（木纹/绿/蓝皮肤）会被这一步直接排掉，
+        # 后面就不用再靠"饱和度高低"分两路判，逻辑干净很多。
+        neutral = (
+            (np.abs(pr - pg) < NEUTRAL_SPREAD)
+            & (np.abs(pg - pb) < NEUTRAL_SPREAD)
+            & (np.abs(pb - pr) < NEUTRAL_SPREAD)
+        )
+        is_black = neutral & (pr <= black_cut) & (pg <= black_cut) & (pb <= black_cut)
+        is_white = neutral & (pr >= white_cut) & (pg >= white_cut) & (pb >= white_cut)
+        black_frac = is_black.mean(axis=2).astype(np.float32)
+        white_frac = is_white.mean(axis=2).astype(np.float32)
+
+    return samples, sats, black_frac, white_frac
 
 
 def _board_ground_color(luma, sat, gx0, gy0, sx, sy, n, rect=None):
@@ -354,25 +387,36 @@ def _read_rect(img, rect, n=19, grid=None):
     gy_hi = max(gy_hi, gy_lo + 1)
 
     luma_gray = gray
-    samples, sats = _sample_points(luma_gray, sat, gx0, gy0, spx, spy, n, offs, (gx_lo, gx_hi, gy_lo, gy_hi))
 
     bg_level, bg_sat = _board_ground_color(luma_gray, sat, gx0, gy0, spx, spy, n, rect=(x, y, w, h))
     if not np.isfinite(bg_level) or bg_level <= 1:
         return None
 
-    # 判黑白分两路，看棋盘底色本身有没有颜色：
-    #  - 彩色底（木纹/黄/绿，S 高）：白子是中性灰，靠饱和度认，亮度完全不可靠
-    #    （实测野狐木纹 luma 201，白子 204，差 1.6%，只靠亮度必错）
-    #  - 中性底（黑/灰棋盘，S 低）：白子靠"更亮"认
-    black_cut = bg_level * 0.62
-    stones[samples < black_cut] = 1
-    if bg_sat > 0.15:
-        neutral_cut = bg_sat * 0.55
-        white_mask = (sats < neutral_cut) | (samples > bg_level * 1.12)
-    else:
-        white_mask = samples > bg_level * 1.12
-    stones[white_mask] = 2
-    stones[samples < black_cut] = 1   # 黑子优先级最高，别被白判据抢走
+    # 判黑白的亮度分界，跟着棋盘底色走（换皮肤不用重调参数）
+    black_cut = bg_level * 0.55
+    white_cut = min(250.0, bg_level * 1.10 + 8)
+
+    samples, sats, black_frac, white_frac = _sample_points(
+        luma_gray,
+        sat,
+        gx0,
+        gy0,
+        spx,
+        spy,
+        n,
+        offs,
+        (gx_lo, gx_hi, gy_lo, gy_hi),
+        img=img,
+        cuts=(black_cut, white_cut),
+    )
+
+    if black_frac is not None:
+        # readboard（LizzieYzy）那套思路：只数"中性灰像素"里的黑白占比。
+        # 子面本身几乎占满这个环，所以真有子的时候占比接近 1，阈值 0.5 留足余量。
+        # 比"平均亮度 + 饱和度"稳：环里混进一圈底色也不会把整点带偏。
+        stones[black_frac >= BLACK_RATIO] = 1
+        stones[white_frac >= WHITE_RATIO] = 2
+        stones[black_frac >= BLACK_RATIO] = 1   # 黑子优先级最高，别被白判据抢走
 
     note = f"rect={x},{y},{w}x{h} step=({spx:.1f},{spy:.1f}) line/random=({ratio_x:.1f},{ratio_y:.1f})"
     return BoardReading(
