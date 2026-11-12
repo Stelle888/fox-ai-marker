@@ -53,6 +53,12 @@ def _window_title(hwnd):
     return buf.value
 
 
+def _process_id(hwnd):
+    pid = wt.DWORD()
+    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    return pid.value
+
+
 def _process_name(hwnd):
     pid = wt.DWORD()
     user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
@@ -110,21 +116,48 @@ def window_alive(hwnd):
         return False
 
 
+def same_process(hwnd_a, hwnd_b):
+    """两个窗口是不是同一个进程的。
+
+    判断"野狐在不在前台"用这个，比直接比 hwnd 稳：
+    野狐切个房间、弹个对话框再回来，前台 hwnd 会变，但进程还是那个。
+    """
+    if not hwnd_a or not hwnd_b:
+        return False
+    try:
+        return _process_id(hwnd_a) == _process_id(hwnd_b)
+    except Exception:
+        return False
+
+
 def find_window(cfg):
-    """找野狐主窗口：进程名匹配，取面积最大的可见窗口。"""
-    proc_want = cfg["window_process"].lower()
+    """找野狐主窗口。
+
+    配了 window_process（默认 foxwq.exe）就**只认进程名**，不看标题。
+    原来这里是 "进程名 or 标题含关键字"，结果出了个经典事故：
+    桌面上放了个叫「野狐AI标注」的文件夹，文件资源管理器窗口标题里就带着"野狐"，
+    于是它被当成野狐选走了 —— 之后前台判断、截图全对着资源管理器，
+    界面上就一直显示"野狐不在前台"。
+
+    顺带排除掉自己进程的窗口（面板标题也叫「野狐 · AI 标注」）。
+    """
+    proc_want = (cfg["window_process"] or "").lower()
     keywords = [k.lower() for k in cfg["window_title_keywords"]]
     found = []
+    my_pid = os.getpid()
 
     @ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
     def _cb(hwnd, _lparam):
         if not user32.IsWindowVisible(hwnd) or is_minimized(hwnd):
             return True
+        if _process_id(hwnd) == my_pid:
+            return True
         title = _window_title(hwnd)
         proc = _process_name(hwnd).lower()
-        ok = (proc_want and proc == proc_want) or any(
-            k in title.lower() for k in keywords if k
-        )
+        if proc_want:
+            ok = proc == proc_want
+        else:
+            ok = any(k in title.lower() for k in keywords if k)
         if not ok:
             return True
         rect = get_rect(hwnd)

@@ -198,9 +198,13 @@ class FoxAdvisor(QObject):
             return
 
         # 野狐不在前台时把标注藏起来（不然它盖在别人窗口上）。
-        # 但面板自己在前台时不算"别人"，否则刚点完开始就什么都看不见。
+        # 比进程而不是比 hwnd：野狐切房间、弹对话框时前台窗口会换，但进程没换。
+        # 面板自己在前台时也不算"别人"，否则刚点完开始就什么都看不见。
         fg = winfox.foreground_hwnd()
-        if self.cfg["overlay_hide_when_other"] and fg not in (self.hwnd, self._panel_hwnd):
+        in_front = winfox.same_process(fg, self.hwnd) or winfox.same_process(
+            fg, self._panel_hwnd
+        )
+        if self.cfg["overlay_hide_when_other"] and not in_front:
             self.overlay.hide()
             self.status = "野狐不在前台，切回去就继续"
             self._poll_engine()
