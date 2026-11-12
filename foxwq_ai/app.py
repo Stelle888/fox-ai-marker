@@ -71,6 +71,7 @@ class FoxAdvisor(QObject):
         self._warmed = False
         self._warm_rid = None
         self._last_change = 0.0
+        self._last_sig = None
         self._log_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "fox-ai.log")
         self._fast_hits = 0
         self._fast_miss = 0
@@ -316,32 +317,36 @@ class FoxAdvisor(QObject):
 
     # ------------------------------------------------------------------
     def _ingest(self, stones):
-        """每帧直接和上一帧比：一样就当没变，不一样就记下来重新问。
+        """更新当前局面。
 
-        这里原来是"连续 2 帧一致才认"加点乐观认子，本意是压误判，
-        结果在落子那一下（野狐有淡入动画，连续几帧读出来全不一样）
-        把局面反复重置、请求反复取消，一个结果都出不来。
-        现在改成最笨也最可靠的做法：变了就是变了，立刻重新问。
-        偶发误判由"问一次就够"和后续画面自然纠正，不需要额外的状态机。
+        判断"局面变没变"只看**哪些位置有子**，不看颜色：真实对局里同一个子会在
+        黑/白/空之间来回抖（落子动画、抗锯齿边缘、"最后一手"的标记都会干扰）。
+        如果连颜色抖动都算新局面，就会每帧重发请求、取消上一个，
+        每个请求都活不过 150 毫秒 —— 表现就是"白棋落子后选点一直不刷新"。
+
+        颜色只用来判断下一手轮到谁；抖一两帧不影响，稳定后自然对。
         """
-        if self.last_stones is not None and np.array_equal(stones, self.last_stones):
+        sig = stones > 0
+        if self.last_stones is not None and np.array_equal(sig, self._last_sig):
             return
 
         nb = int((stones == 1).sum())
         nw = int((stones == 2).sum())
         prev_n = -1 if self.last_stones is None else int((self.last_stones > 0).sum())
+
         if self.last_stones is not None:
-            prev, cur = self.last_stones, stones
-            added = (cur > 0) & (prev == 0)
+            added = sig & ~self._last_sig
             if int(added.sum()) == 1:
-                self._last_move_color = int(cur[added][0])
+                j, i = np.argwhere(added)[0]
+                self._last_move_color = int(stones[j, i])
         else:
             self._last_move_color = 0
 
         self.last_stones = stones.copy()
+        self._last_sig = sig
         self._analyzed_stones = None
         self._last_change = time.time()
-        self._trace(f"局面: 黑{nb} 白{nw}（上一帧 {prev_n} 子）")
+        self._trace(f"局面: 黑{nb} 白{nw}（上一帧 {prev_n} 子，现在 {nb + nw} 子）")
 
     def _next_player(self):
         if self.last_stones is None:

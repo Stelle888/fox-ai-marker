@@ -12,8 +12,8 @@ import cv2
 
 # 判子参数（思路来自 readboard / LizzieYzy 的 BoardOCR）
 NEUTRAL_SPREAD = 50   # 三通道两两差都小于这个 → 算"中性灰"（彩色木纹底会被排掉）
-BLACK_RATIO = 0.5     # 中性像素里"够黑"的占比到这么多 → 黑子
-WHITE_RATIO = 0.5     # "够白"的占比到这么多 → 白子
+BLACK_RATIO = 0.33    # 中性像素里"够黑"的占比到这么多 → 黑子（readboard 的 black-percent=33）
+WHITE_RATIO = 0.33    # "够白"的占比到这么多 → 白子（readboard 的 white-percent=33）
 
 
 # 结果容器
