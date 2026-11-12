@@ -1,0 +1,6 @@
+# 启动.bat 是 GBK 编码、CRLF 换行（cmd 只认这个），不让 git 碰它
+*.bat -text
+*.ps1 -text
+
+# 其余按 LF 存，checkout 到 Windows 也是 LF（Python 不挑）
+* text=auto eol=lf
