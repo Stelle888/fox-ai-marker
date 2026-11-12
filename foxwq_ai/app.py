@@ -401,8 +401,9 @@ class FoxAdvisor(QObject):
             else:
                 self.status = "引擎已停止：" + (self.engine.last_error or "未知原因")
             return
-        # 局面刚变，让它先稳住（落子动画期间识别会抖），别急着问
-        if time.time() - self._last_change < 0.10:
+        # 只等 50ms。识别已经稳定了，这个纯粹是兜一下落子动画的第一帧，
+        # 不能大 —— 大一点你落子的手感就变成"等一下才出点"。
+        if time.time() - self._last_change < 0.05:
             return
         player = self._next_player()
         # 有正式请求了：预热立刻让路（它只是烘 GPU，不该占着算力）

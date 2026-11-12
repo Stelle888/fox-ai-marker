@@ -410,13 +410,29 @@ def _read_rect(img, rect, n=19, grid=None):
         cuts=(black_cut, white_cut),
     )
 
+    # 判黑白分两路，看棋盘底色本身有没有颜色：
+    #  - 彩色底（木纹/黄/绿，S 高）：白子是中性灰，靠饱和度认，亮度完全不可靠
+    #    （实测野狐木纹 luma 201，白子 204，差 1.6%，只靠亮度必错）
+    #  - 中性底（黑/灰棋盘，S 低）：白子靠"更亮"认
+    #
+    # 为什么不用 readboard 那套"中性灰像素占比"：思路更干净，但它是拿固定阈值
+    # （96/159）配固定皮肤调出来的。换成自适应阈值再搬过来，在真实野狐上实测会
+    # 让同一个子在相邻交叉点之间来回跳（一帧一个样），反而比这套老判据差。
+    # 老判据在真实对局里验过 9/9 全对，所以以它为准。
+    bc = bg_level * 0.62
+    stones[samples < bc] = 1
+    if bg_sat > 0.15:
+        neutral_cut = bg_sat * 0.55
+        white_mask = (sats < neutral_cut) | (samples > bg_level * 1.12)
+    else:
+        white_mask = samples > bg_level * 1.12
+    # 新判据只在白子上做一次"加法"：老判据漏掉、而它在环里数出大量纯白像素时补认，
+    # 不参与黑子判定（黑子本来就准，加上去只会引入抖动）。
     if black_frac is not None:
-        # readboard（LizzieYzy）那套思路：只数"中性灰像素"里的黑白占比。
-        # 子面本身几乎占满这个环，所以真有子的时候占比接近 1，阈值 0.5 留足余量。
-        # 比"平均亮度 + 饱和度"稳：环里混进一圈底色也不会把整点带偏。
-        stones[black_frac >= BLACK_RATIO] = 1
-        stones[white_frac >= WHITE_RATIO] = 2
-        stones[black_frac >= BLACK_RATIO] = 1   # 黑子优先级最高，别被白判据抢走
+        rescue = (stones == 0) & (white_frac >= 0.55)
+        white_mask = white_mask | rescue
+    stones[white_mask] = 2
+    stones[samples < bc] = 1   # 黑子优先级最高，别被白判据抢走
 
     note = f"rect={x},{y},{w}x{h} step=({spx:.1f},{spy:.1f}) line/random=({ratio_x:.1f},{ratio_y:.1f})"
     return BoardReading(

@@ -51,7 +51,7 @@ DEFAULTS = {
     "max_visits": 120,
     # 每多少秒让引擎回报一次中间结果。必须写进请求，写进 analysis.cfg 无效。
     # 调小 = 点更早出现、但会跟着搜索慢慢挪位置；调大 = 出现得晚，但一出现就比较准。
-    "report_every": 0.2,  # 每 0.2 秒回报一次中间结果（写进请求，不是 cfg）
+    "report_every": 0.15,  # 每 0.15 秒回报一次中间结果（写进请求，不是 cfg）
     "analysis_threads": 2,      # 不改 cfg 时的兜底线程数提示（真值在 analysis.cfg）
     "komi": 7.5,
     "rules": "chinese",
