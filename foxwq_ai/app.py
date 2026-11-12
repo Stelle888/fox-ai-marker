@@ -4,6 +4,7 @@
 只有 KataGo 的收发在它自己的子线程里，互不阻塞。
 """
 
+import os
 import time
 
 import numpy as np
@@ -70,6 +71,7 @@ class FoxAdvisor(QObject):
         self._warmed = False
         self._warm_rid = None
         self._last_change = 0.0
+        self._log_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "fox-ai.log")
         self._fast_hits = 0
         self._fast_miss = 0
 
@@ -84,6 +86,14 @@ class FoxAdvisor(QObject):
         msg = " ".join(str(x) for x in a)
         self.engine_msg = msg[:200]
         print("[engine]", msg, flush=True)
+
+    def _trace(self, msg):
+        """关键事件写一行到 fox-ai.log，出问题时有据可查（这个文件很小，留着无害）。"""
+        try:
+            with open(self._log_path, "a", encoding="utf-8") as f:
+                f.write(f"{time.strftime('%H:%M:%S')} {msg}\n")
+        except Exception:
+            pass
 
     def start(self):
         """启动引擎并开始空转（不截图，等用户点"开始分析"）。"""
@@ -306,67 +316,32 @@ class FoxAdvisor(QObject):
 
     # ------------------------------------------------------------------
     def _ingest(self, stones):
-        """把本帧局面并进对局状态。
+        """每帧直接和上一帧比：一样就当没变，不一样就记下来重新问。
 
-        默认要连续 2 帧一致才认（150ms 一帧，压掉偶发误判）。
-        但"只多了一个子"是落子，是最常见也最需要快的动作，所以单帧就先认。
-
-        关键是 changed 这个判断：野狐落子有淡入动画，连着好几帧读出来的东西
-        都不一样。如果每帧都当成"新局面"，就会疯狂取消 + 重发请求，
-        最后一个结果都等不到 —— 表现就是"开局有标注，落了子就不刷新了"。
+        这里原来是"连续 2 帧一致才认"加点乐观认子，本意是压误判，
+        结果在落子那一下（野狐有淡入动画，连续几帧读出来全不一样）
+        把局面反复重置、请求反复取消，一个结果都出不来。
+        现在改成最笨也最可靠的做法：变了就是变了，立刻重新问。
+        偶发误判由"问一次就够"和后续画面自然纠正，不需要额外的状态机。
         """
-        if self._pending is not None and np.array_equal(stones, self._pending):
-            self._pending_n += 1
+        if self.last_stones is not None and np.array_equal(stones, self.last_stones):
+            return
+
+        nb = int((stones == 1).sum())
+        nw = int((stones == 2).sum())
+        prev_n = -1 if self.last_stones is None else int((self.last_stones > 0).sum())
+        if self.last_stones is not None:
+            prev, cur = self.last_stones, stones
+            added = (cur > 0) & (prev == 0)
+            if int(added.sum()) == 1:
+                self._last_move_color = int(cur[added][0])
         else:
-            self._pending = stones.copy()
-            self._pending_n = 1
+            self._last_move_color = 0
 
-        changed = self.last_stones is None or not np.array_equal(
-            self._pending, self.last_stones
-        )
-
-        if self._pending_n < 2:
-            if changed and self.last_stones is not None:
-                prev, cur = self.last_stones, self._pending
-                added = (cur > 0) & (prev == 0)
-                gone = (prev > 0) & (cur == 0)
-                if int(added.sum()) == 1 and int(gone.sum()) == 0:
-                    self._last_move_color = int(cur[added][0])
-                    self.last_stones = cur.copy()
-                    self._analyzed_stones = None
-                    self._last_change = time.time()
-            return
-
-        stable = self._pending
-        if self.last_stones is None:
-            self.last_stones = stable.copy()
-            self._last_change = time.time()
-            return
-        if np.array_equal(stable, self.last_stones):
-            return
-
-        prev, cur = self.last_stones, stable
-        added = (cur > 0) & (prev == 0)
-        removed = (prev > 0) & (cur == 0)
-        n_add = int(added.sum())
-        n_rm = int(removed.sum())
-
-        if n_add == 1 and n_rm == 0:
-            self._last_move_color = int(cur[added][0])
-            self.last_stones = stable.copy()
-            self._analyzed_stones = None
-            self._last_change = time.time()
-            return
-
-        # 悔棋 / 新对局 / 切换棋盘：整盘重建
-        self._log(f"局面重建（新增 {n_add} 子，消失 {n_rm} 子）")
-        self.last_stones = stable.copy()
+        self.last_stones = stones.copy()
         self._analyzed_stones = None
-        self._current_rid = None
-        self._last_cands = []
-        # 最后落子颜色未知，用子数推断下一手（黑白子数相等时轮黑）
-        self._last_move_color = 0
         self._last_change = time.time()
+        self._trace(f"局面: 黑{nb} 白{nw}（上一帧 {prev_n} 子）")
 
     def _next_player(self):
         if self.last_stones is None:
@@ -406,7 +381,15 @@ class FoxAdvisor(QObject):
         if self._analyzed_stones is not None and np.array_equal(
             self._analyzed_stones, self.last_stones
         ):
-            return
+            # 问过了，但万一那条请求死在半路（被取消、引擎抽风），
+            # 就会永远等下去。这里兜一个底：超过 2.5s 还没结果就重发一次。
+            if self._current_rid and time.time() - self._analysis_start > 5.0:
+                self._trace(f"请求 {self._current_rid} 超过 5s 没结果，重发")
+                self.engine.cancel(self._current_rid)
+                self._current_rid = None
+                self._analyzed_stones = None
+            else:
+                return
         if not (self.engine.alive and self.engine.ready):
             if self.engine.alive:
                 self.status = "引擎加载中…"
@@ -427,14 +410,19 @@ class FoxAdvisor(QObject):
         rid = self.engine.analyze(self.last_stones, player)
         if rid is None:
             self.status = "请求引擎失败：" + self.engine.last_error
+            self._trace("请求失败: " + (self.engine.last_error or "?"))
             return
         self._current_rid = rid
         self._analyzed_stones = self.last_stones.copy()
         self._analysis_start = time.time()
         self._current_state = None
+        n = self.cfg["board_size"]
+        _ = n
         # 故意不清空 _last_cands：让旧点先留在棋盘上，新结果一到就覆盖。
         # 清空的话棋盘会空出一二百毫秒，看着就像"标注掉了"。
         self.status = f"分析中…（{'黑' if player == 'B' else '白'}方）"
+        self._trace(f"发请求 {rid}（轮到{'黑' if player == 'B' else '白'}，"
+                    f"盘上 {int((self.last_stones > 0).sum())} 子）")
 
     def _poll_engine(self):
         if not self._current_rid:
@@ -445,21 +433,30 @@ class FoxAdvisor(QObject):
         # 已经有最终结果了就不再被中间结果覆盖
         if self._current_state is not None and not self._current_state["during"]:
             return
+        first = self._current_state is None
+        was_during = self._current_state is not None and self._current_state["during"]
         self._current_state = res
         self._pick_candidates(res)
+        if first:
+            self._trace(f"{self._current_rid} 首个结果: {len(res['candidates'])} 候选 "
+                        f"-> 标了 {len(self._last_cands)} 个")
         if not res["during"]:
-            n = self.cfg["board_size"]
-            self.status = f"已出结果（{'黑' if self._next_player() == 'B' else '白'}方）"
-            _ = n
+            if was_during or first:
+                self._trace(f"{self._current_rid} 最终结果 -> 标了 {len(self._last_cands)} 个")
+                self.status = f"已出结果（{'黑' if self._next_player() == 'B' else '白'}方）"
+            # 这一手算完了，把 rid 放掉：否则 5 秒后会被超时逻辑当成"卡死"重发一遍
+            self._current_rid = None
 
     def _pick_candidates(self, res):
         cands = [c for c in res["candidates"] if c.visits > 0]
         if not cands:
             return
         # 中间结果刚起来时第一名可能才几个 visits，这时候画出来会乱跳。
-        # 但门槛不能太高：这台机器上 b18 大约 30ms 一个 visit，压到 24 就得等
-        # 0.7 秒以上才开始画面，跟"即时"就无关了。8 个 visits 已经能定住前三名。
-        if res.get("during") and cands[0].visits < 8:
+        # 门槛必须极低。这台机器上 b18c384nbt 首手能慢到 100ms 一个 visit，
+        # 压到 8 就意味着第一个点要等 0.8 秒以上 —— 实测直接被挡成"不出点"。
+        # 宁可让点先跳两下，也不能让它不出现。
+        if res.get("during") and cands[0].visits < 2:
+            self._trace(f"  中间结果太浅（{cands[0].visits} visits），先不画")
             return
         chosen = choose_candidates(
             cands,
