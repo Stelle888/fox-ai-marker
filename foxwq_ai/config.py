@@ -71,8 +71,8 @@ DEFAULTS = {
     "show_candidates": 3,         # 最多标几个点
     "winrate_gap_1stone": 1.5,    # 一选与二选胜率差(百分点) ≥ 此值 → 只标一选
     "winrate_gap_2stone": 3.0,    # 二选与三选胜率差 ≥ 此值 → 不标三选
-    "dot_radius_ratio": 0.40,     # 点半径 = 0.40 格
-    "colors": ["#19E68C", "#FFC13D", "#4FA8FF"],  # 一选/二选/三选
+    "dot_radius_ratio": 0.38,     # 点半径 = 0.38 格
+    "colors": ["#25E29A", "#FFC24A", "#5FAEFF"],  # 一选/二选/三选
     "show_winrate_text": True,    # 点上是否写胜率
     "show_status": False,         # 左上角那行状态小字（默认关，面板里已经能看到）
     "dot_alpha": 215,

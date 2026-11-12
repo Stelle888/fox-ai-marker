@@ -42,11 +42,11 @@ class FoxAdvisor(QObject):
         self.on_update = on_update or (lambda *a, **k: None)
         self.overlay = BoardOverlay(cfg)
         self.engine = KataGoEngine(cfg, log=self._log)
-        self.paused = False
 
         self.hwnd = None
         self.phys_rect = None
-        self._last_window_check = 0.0
+        self.running = False          # 只有用户点了"开始分析"才为 True
+        self._panel_hwnd = 0          # 面板自己的窗口句柄（它在前台时不算"别的窗口"）
         self._rect_hint = None          # 上次成功识别的棋盘矩形
         self._grid = None
 
@@ -82,29 +82,52 @@ class FoxAdvisor(QObject):
         print("[engine]", msg, flush=True)
 
     def start(self):
+        """启动引擎并开始空转（不截图，等用户点"开始分析"）。"""
         ok = self.engine.start()
         if not ok:
             self.status = "引擎启动失败：" + self.engine.last_error
         else:
-            self.status = "引擎加载中…"
+            self.status = "准备好了，点「开始分析」"
         self.timer.start()
 
-    def stop(self):
+    def shutdown(self):
         self._stopping = True
+        self.running = False
         self.timer.stop()
         self.overlay.hide()
         self.engine.stop()
 
-    def set_paused(self, paused):
-        self.paused = paused
-        if paused:
-            self.overlay.clear_points()
-            self.status = "已暂停"
-        else:
-            self.status = "已恢复"
+    def set_panel_hwnd(self, hwnd):
+        """面板自己的句柄：它在前台时不该算"别的窗口"。"""
+        self._panel_hwnd = int(hwnd or 0)
 
-    def recalibrate(self):
-        """忘掉棋盘位置和当前局面，下一帧重新找。"""
+    def start_analysis(self):
+        """用户点「开始分析」：此刻把野狐窗口锁下来，之后不再反复枚举。"""
+        if self.running:
+            return True
+        hwnd = winfox.find_window(self.cfg)
+        if not hwnd:
+            self.status = "没找到野狐窗口，先打开野狐并进到对局页"
+            return False
+        if winfox.is_minimized(hwnd):
+            self.status = "野狐窗口是最小化的"
+            return False
+        self.hwnd = hwnd
+        self._reset_board_state()
+        self.running = True
+        self.status = "已开始，等棋盘出现…"
+        self._log("锁定野狐窗口")
+        return True
+
+    def stop_analysis(self, reason=""):
+        self.running = False
+        self.overlay.clear_points()
+        self.overlay.hide()
+        self._reset_board_state()
+        self.status = reason or "已停止"
+        self.hwnd = None
+
+    def _reset_board_state(self):
         self._rect_hint = None
         self.last_stones = None
         self._pending = None
@@ -113,13 +136,19 @@ class FoxAdvisor(QObject):
         self._analyzed_stones = None
         self._current_state = None
         self._last_cands = []
+        self._grid = None
+        self.phys_rect = None
+
+    def recalibrate(self):
+        """忘掉棋盘位置和当前局面，下一帧重新找。"""
+        self._reset_board_state()
         self.overlay.clear_points()
         self.status = "重新寻找棋盘…"
 
     # ------------------------------------------------------------------
     def _watchdog(self, now):
         """引擎挂了就自己拉起来一次，不用人管。"""
-        if self._stopping or self.paused:
+        if self._stopping:
             return
         if self.engine.alive:
             return
@@ -143,40 +172,29 @@ class FoxAdvisor(QObject):
             self._frame_count = 0
             self._fps_last = now
 
-        # 找窗口（2 秒一次就够，省得每帧枚举）
-        if now - self._last_window_check > 2.0 or not self.hwnd:
-            self._last_window_check = now
-            hwnd = winfox.find_window(self.cfg)
-            if hwnd != self.hwnd:
-                self.hwnd = hwnd
-                self._rect_hint = None
-                self.last_stones = None
-                self._pending = None
-                self._pending_n = 0
-                self._current_rid = None
-                self._last_cands = []
-                self.overlay.clear_points()
-                if hwnd:
-                    self._log("找到野狐窗口")
+        if not self.running:
+            self._watchdog(now)
+            return
 
-        if not self.hwnd:
-            self.status = "没找到野狐窗口"
-            self.overlay.hide()
+        # 窗口是在点"开始分析"那一刻锁定的，之后不再枚举；只有它真的没了才停
+        if not winfox.window_alive(self.hwnd):
+            self.stop_analysis("野狐窗口不见了")
             self._notify()
             return
 
         if winfox.is_minimized(self.hwnd):
             self.status = "野狐已最小化"
             self.overlay.hide()
+            self._poll_engine()
             self._notify()
             return
 
-        # 野狐不在前台时，把标注藏起来（不然它盖在别人的窗口上）
+        # 野狐不在前台时把标注藏起来（不然它盖在别人窗口上）。
+        # 但面板自己在前台时不算"别人"，否则刚点完开始就什么都看不见。
         fg = winfox.foreground_hwnd()
-        if self.cfg["overlay_hide_when_other"] and fg != self.hwnd:
-            # 但点在这上面的时候不藏：点穿过去了，前台还是野狐
+        if self.cfg["overlay_hide_when_other"] and fg not in (self.hwnd, self._panel_hwnd):
             self.overlay.hide()
-            self.status = "野狐不在前台"
+            self.status = "野狐不在前台，切回去就继续"
             self._poll_engine()
             self._notify()
             return
@@ -219,8 +237,7 @@ class FoxAdvisor(QObject):
 
         self._ingest(reading.stones)
 
-        if not self.paused:
-            self._maybe_analyze()
+        self._maybe_analyze()
         self._poll_engine()
         self._render()
         self._notify()
@@ -372,6 +389,11 @@ class FoxAdvisor(QObject):
 
     # ------------------------------------------------------------------
     def snapshot(self):
+        st = self._current_state
+        top = None
+        if st and st.get("candidates"):
+            c = st["candidates"][0]
+            top = {"move": c.move, "visits": c.visits}
         return {
             "status": self.status,
             "engine_msg": self.engine_msg,
@@ -383,6 +405,7 @@ class FoxAdvisor(QObject):
             "fps": self._fps,
             "stones": int((self.last_stones > 0).sum()) if self.last_stones is not None else 0,
             "player": self._next_player(),
-            "quality": None,
-            "paused": self.paused,
+            "running": self.running,
+            "ready": bool(self.engine.ready and self.engine.alive),
+            "visits": top["visits"] if top else 0,
         }

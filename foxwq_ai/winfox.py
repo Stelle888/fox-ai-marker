@@ -100,6 +100,16 @@ def foreground_hwnd():
     return root or fg
 
 
+def window_alive(hwnd):
+    """窗口还在不在（用户可能把野狐关了）。"""
+    if not hwnd:
+        return False
+    try:
+        return bool(user32.IsWindow(int(hwnd)))
+    except Exception:
+        return False
+
+
 def find_window(cfg):
     """找野狐主窗口：进程名匹配，取面积最大的可见窗口。"""
     proc_want = cfg["window_process"].lower()

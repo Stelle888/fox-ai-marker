@@ -7,7 +7,7 @@
 import ctypes
 
 from PySide6.QtCore import Qt, QPointF, QRectF, QTimer
-from PySide6.QtGui import QColor, QFont, QPainter, QPen, QBrush
+from PySide6.QtGui import QColor, QFont, QPainter, QPen, QBrush, QRadialGradient
 from PySide6.QtWidgets import QWidget
 
 user32 = ctypes.windll.user32
@@ -131,30 +131,59 @@ class BoardOverlay(QWidget):
         _ = dpr
         x0, y0, sx, sy = self.grid
 
-        # 点：不同颜色 + 细白圈，保证深色皮肤上也看得清
-        for (i, j, color, label) in self.candidates:
+        # 点：外发光 + 径向渐变 + 白细环。一选多一圈，层级一眼能看出来。
+        for k, (i, j, color, label) in enumerate(self.candidates):
             cx = (x0 + i * sx) * s
             cy = (y0 + j * sy) * s
             rad = (min(sx, sy) * float(self.cfg["dot_radius_ratio"])) * s
-            c = QColor(color)
-            c.setAlpha(int(self.cfg["dot_alpha"]))
-            p.setBrush(QBrush(c))
-            p.setPen(QPen(QColor(255, 255, 255, 200), max(1.0, 1.2 * s)))
+            base = QColor(color)
+            primary = (k == 0)
+
+            # 1) 外发光：让点和棋盘底色分得开，又不像贴纸
+            glow = QColor(base)
+            glow.setAlpha(34 if primary else 26)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QBrush(glow))
+            p.drawEllipse(QPointF(cx, cy), rad * 1.55, rad * 1.55)
+
+            # 2) 主体：径向渐变，中心实、边缘略微透出来
+            grad = QRadialGradient(QPointF(cx, cy - rad * 0.28), rad * 1.25)
+            a = int(self.cfg["dot_alpha"])
+            c0 = QColor(base)
+            c0.setAlpha(min(255, a + 25))
+            c1 = QColor(base)
+            c1.setAlpha(max(60, int(a * 0.86)))
+            c2 = QColor(base)
+            c2.setAlpha(max(40, int(a * 0.55)))
+            grad.setColorAt(0.0, c0)
+            grad.setColorAt(0.62, c1)
+            grad.setColorAt(1.0, c2)
+            p.setBrush(QBrush(grad))
+            p.setPen(QPen(QColor(255, 255, 255, 242), max(1.2, 1.6 * s)))
             p.drawEllipse(QPointF(cx, cy), rad, rad)
 
+            # 3) 一选外面再加一圈细环
+            if primary:
+                ring = QColor(base)
+                ring.setAlpha(150)
+                p.setBrush(Qt.NoBrush)
+                p.setPen(QPen(ring, max(1.0, 1.3 * s)))
+                p.drawEllipse(QPointF(cx, cy), rad * 1.24, rad * 1.24)
+
+            # 4) 胜率数字：白色，带一圈暗描边
             if self.show_status and label:
-                f = QFont("Microsoft YaHei", max(7, int(rad * 0.42 / s / 1.3)))
+                f = QFont("Consolas", 1)
                 f.setBold(True)
+                f.setPixelSize(max(9, int(rad * 0.55)))
                 p.setFont(f)
-                p.setPen(QPen(QColor(0, 0, 0, 190)))
                 p.setBrush(QBrush(Qt.NoBrush))
-                # 轻微描边：先黑后白，压在任意底色上都读得出来
+                p.setPen(QPen(QColor(0, 0, 0, 170)))
                 for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
                     p.drawText(
                         QRectF(cx - rad + dx, cy - rad + dy, rad * 2, rad * 2),
                         Qt.AlignCenter, label,
                     )
-                p.setPen(QPen(QColor(255, 255, 255, 240)))
+                p.setPen(QPen(QColor(255, 255, 255, 245)))
                 p.drawText(QRectF(cx - rad, cy - rad, rad * 2, rad * 2), Qt.AlignCenter, label)
 
         # 左上角状态（很小，不碍事）
