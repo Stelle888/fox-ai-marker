@@ -256,7 +256,7 @@ class KataGoGtp:
             # **必须重发一次 kata-analyze**：`clear_board` 会把正在跑的持续分析打断，
             # 之后引擎一声不吭，界面就永远停在旧点上。这一句是"落子后能刷新"的关键。
             if self._analyzing:
-                self._send("kata-analyze 5 maxmoves 8")
+                self._send("kata-analyze 10 maxmoves 8")
         return len(extra)
 
     def begin_analyze(self):
@@ -264,7 +264,7 @@ class KataGoGtp:
         if self._analyzing:
             return
         self._analyzing = True
-        self._send("kata-analyze 5 maxmoves 8")
+        self._send("kata-analyze 10 maxmoves 8")
 
     def end_analyze(self):
         if not self._analyzing:

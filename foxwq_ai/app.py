@@ -394,12 +394,19 @@ class FoxAdvisor(QObject):
         return "W" if black > white else "B"
 
     def _pick_candidates(self, cands_list):
-        # GTP 持续分析给的候选是"按 move 累积"的，只有一个 visit 的先不画，
-        # 免得刚发 `play` 那一瞬间拿搜索树里还没站稳的点去闪一下。
+        # 门槛分两档，解决"点一直在跳"：
+        #   还没有点的时候——1 个 visit 就画，落子立刻能看到东西；
+        #   已经有点了——要求搜索攒够 SETTLE_VISITS 才替换，不然每 100ms
+        #                 胜负未分的浅结果都会把点拽到别处，看着就是乱闪。
+        # 这也是它"变几次就稳"的原因：不是它算得准，是它在等结果长结实。
+        SETTLE_VISITS = 12
         cands = [c for c in cands_list if c.visits >= 1]
         if not cands:
             return
         cands.sort(key=lambda c: -c.visits)
+        need = 1 if not self._last_cands else SETTLE_VISITS
+        if cands[0].visits < need:
+            return
         chosen = choose_candidates(
             cands,
             int(self.cfg["show_candidates"]),
@@ -411,6 +418,11 @@ class FoxAdvisor(QObject):
             color = self.cfg["colors"][min(k, len(self.cfg["colors"]) - 1)]
             label = f"{c.winrate * 100:.1f}"
             out.append((c.i, c.j, color, label))
+        # 位置和顺序都没变就什么都不做 —— 重画一次也看不出区别，只会闪。
+        if out and [x[:2] for x in out] == [x[:2] for x in self._last_cands]:
+            # 但数字（胜率）还是要更新，不然显示会僵在落子那一刻
+            self._last_cands = out
+            return
         self._last_cands = out
 
     def _render(self):
