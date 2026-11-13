@@ -251,19 +251,20 @@ class KataGoGtp:
             self._board = []
             cur_set = set()
         extra = [x for x in target if x not in cur_set]
-        changed = bool(extra) or bool(missing)
+        rebuilt = bool(missing)
         for color, mv in extra:
             self._send(f"play {color} {mv}")
             self._board.append((color, mv))
-        if changed:
+        if extra or rebuilt:
             # 局面变了，旧候选全部作废（不然会显示上一手的点）
             with self._lock:
                 self._cands = []
                 self._gen += 1
-            # **必须重发一次 kata-analyze**：`clear_board` 会把正在跑的持续分析打断，
-            # 之后引擎一声不吭，界面就永远停在旧点上。这一句是"落子后能刷新"的关键。
-            if self._analyzing:
-                self._send("kata-analyze 10 maxmoves 8")
+        # **只有 clear_board 之后才需要重发 kata-analyze**（清盘会打断持续分析）。
+        # 普通 `play` 绝对不能重发 —— 每发一次搜索树就从头开始，
+        # 实测 visits 会永远卡在个位数，屏幕上只剩最浅的一两个点。
+        if rebuilt and self._analyzing:
+            self._send("kata-analyze 10 maxmoves 8")
         return len(extra)
 
     def begin_analyze(self):
@@ -291,4 +292,3 @@ class KataGoGtp:
         self._send(f"boardsize {n}")
         self._send(f"komi {komi}")
         self._send(f"kata-set-rules {rules}")
-        self._send("clear_cache")

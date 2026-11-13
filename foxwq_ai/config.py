@@ -72,8 +72,8 @@ DEFAULTS = {
 
     # ---------- 标注 ----------
     "show_candidates": 3,         # 最多标几个点
-    "winrate_gap_1stone": 1.5,    # 一选与二选胜率差(百分点) ≥ 此值 → 只标一选
-    "winrate_gap_2stone": 3.0,    # 二选与三选胜率差 ≥ 此值 → 不标三选
+    "winrate_gap_1stone": 100.0,  # 几乎不再因为“差得多”而砍掉二选
+    "winrate_gap_2stone": 100.0,  # 同上：默认把三个都标出来
     "dot_radius_ratio": 0.38,     # 点半径 = 0.38 格
     "colors": ["#25E29A", "#FFC24A", "#5FAEFF"],  # 一选/二选/三选
     "show_winrate_text": True,    # 点上是否写胜率

@@ -405,7 +405,7 @@ class FoxAdvisor(QObject):
         #   已经有点了——要求搜索攒够 SETTLE_VISITS 才替换，不然每 100ms
         #                 胜负未分的浅结果都会把点拽到别处，看着就是乱闪。
         # 这也是它"变几次就稳"的原因：不是它算得准，是它在等结果长结实。
-        SETTLE_VISITS = 12
+        SETTLE_VISITS = 3
         cands = [c for c in cands_list if c.visits >= 1]
         if not cands:
             return
@@ -414,6 +414,7 @@ class FoxAdvisor(QObject):
         # 已经画过一次 → 要求攒够 SETTLE_VISITS 才换位置，不然会乱闪。
         need = SETTLE_VISITS if self._cand_fresh else 1
         if cands[0].visits < need:
+            self._trace(f"  候选不够深: 最多 {cands[0].visits}v < 需要 {need}v（共 {len(cands)} 个）")
             return
         chosen = choose_candidates(
             cands,
