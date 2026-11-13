@@ -260,10 +260,11 @@ class KataGoGtp:
             with self._lock:
                 self._cands = []
                 self._gen += 1
-        # **只有 clear_board 之后才需要重发 kata-analyze**（清盘会打断持续分析）。
-        # 普通 `play` 绝对不能重发 —— 每发一次搜索树就从头开始，
-        # 实测 visits 会永远卡在个位数，屏幕上只剩最浅的一两个点。
-        if rebuilt and self._analyzing:
+        # **每发一次 play 都要重发 kata-analyze**。实测 `play` 会让持续分析彻底
+        # 停下来（之后一条 info 都收不到），不重发就永远不再更新。
+        # 代价是搜索树从零开始，MX250 上要 5~10 秒才把三个候选攒齐 ——
+        # 这是硬件下限，不是命令写错了。
+        if (extra or rebuilt) and self._analyzing:
             self._send("kata-analyze 10 maxmoves 8")
         return len(extra)
 

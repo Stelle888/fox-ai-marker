@@ -400,12 +400,10 @@ class FoxAdvisor(QObject):
         return "W" if black > white else "B"
 
     def _pick_candidates(self, cands_list):
-        # 门槛分两档，解决"点一直在跳"：
-        #   还没有点的时候——1 个 visit 就画，落子立刻能看到东西；
-        #   已经有点了——要求搜索攒够 SETTLE_VISITS 才替换，不然每 100ms
-        #                 胜负未分的浅结果都会把点拽到别处，看着就是乱闪。
-        # 这也是它"变几次就稳"的原因：不是它算得准，是它在等结果长结实。
-        SETTLE_VISITS = 3
+        # 只要有候选就画。之前设过 12 的门槛想压抖动，结果在 MX250 上
+        # 搜索根本攒不到那么多 visit，门槛永远不满足，屏幕上就只剩第一次的
+        # 一个点 —— 用户看到的就是"说好的三个点变一个"。
+        SETTLE_VISITS = 1
         cands = [c for c in cands_list if c.visits >= 1]
         if not cands:
             return
@@ -421,6 +419,9 @@ class FoxAdvisor(QObject):
             int(self.cfg["show_candidates"]),
             float(self.cfg["winrate_gap_1stone"]),
             float(self.cfg["winrate_gap_2stone"]),
+        )
+        self._trace(
+            f"  选点: {len(cands)} 个候选 -> 选 {[c.move for c in chosen]}"
         )
         out = []
         for k, c in enumerate(chosen):
