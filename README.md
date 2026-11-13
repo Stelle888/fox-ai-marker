@@ -2,6 +2,8 @@
 
 在野狐围棋的棋盘上，标出 AI 觉得值得下的几个点。
 
+![preview](docs/preview.png)
+
 > **只用来提高棋力，别用来作弊。**
 >
 > 它不会替你落子，不点棋盘，不碰野狐的任何东西。
@@ -10,12 +12,19 @@
 
 ---
 
-## 不用装任何东西
+## 下载
 
-引擎、权重、Python 运行时全在这个包里，解压就能用。
+到 [Releases](https://github.com/Stelle888/fox-ai-marker/releases/latest) 下 `fox-ai-marker-win64.zip`（约 300 MB），解压即可。
 
-（`python\` 那个目录就是自带的 Python，别删。删了它也不会立刻坏，
-但会退回去找你系统里装的 Python —— 那样就得自己 `pip install` 了。）
+**不用装 Python**，不用装引擎。引擎、权重、Python 运行时都在包里的：
+
+```
+fox-ai-marker\
+├─ 启动.bat            ← 双击这个
+├─ python\            ← 自带的 Python（别删）
+├─ katago\katago.exe  ← 引擎
+└─ weights\           ← 权重
+```
 
 ---
 
