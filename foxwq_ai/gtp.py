@@ -119,6 +119,13 @@ class KataGoGtp:
             if len(self._stderr_tail) > 40:
                 self._stderr_tail.pop(0)
             low = line.lower()
+            # 就绪信号。KataGo v1.16.5 实际打的是这一行：
+            #   GTP ready, beginning main protocol loop
+            # 之前只靠 stdout 里的 "=" 判断，实测 60 秒都等不到；
+            # 结果 setup / begin_analyze 一次都没发出去，引擎从头到尾没干活 ——
+            # 界面上就是"棋盘读得很准，但选点永远不动"。
+            if "gtp ready" in low or "beginning main protocol loop" in low:
+                self.ready = True
             if "uncaught" in low or "error" in low or "failed" in low:
                 self.last_error = line[:300]
                 self.log("[引擎 stderr]", line)
