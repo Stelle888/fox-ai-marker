@@ -12,19 +12,22 @@
 
 ## 装一次
 
-```powershell
-pip install -r requirements.txt
-powershell -ExecutionPolicy Bypass -File scripts\setup.ps1
-```
+包里有引擎和权重，不用另外下载。只差 Python 依赖：
 
-第二条下载引擎和权重（约 100 MB）。跑不动就手动放：`katago\katago.exe`、`weights\*.bin.gz`。
+**双击 `install.bat`**。
+
+它是装 Python 包的，跑完窗口会停住等你按键。以后不用再跑。
+
+> 前提：机器上有 Python 3.10 或更新版本。
+> 没有就去 [python.org](https://www.python.org/downloads/) 装一个，
+> 安装时记得勾上 **Add python.exe to PATH**。
 
 ---
 
 ## 用
 
 1. 打开野狐，进**对局页**（能看见棋盘）。
-2. 双击 **`启动.bat`**。
+2. 双击 **`start.bat`**。
 3. 把野狐窗口放前面，点面板上的 **开始分析**。
 
 落一手，棋盘上马上出点：
