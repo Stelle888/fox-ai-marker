@@ -10,17 +10,12 @@
 
 ---
 
-## 装一次
+## 不用装任何东西
 
-包里有引擎和权重，不用另外下载。只差 Python 依赖：
+引擎、权重、Python 运行时全在这个包里，解压就能用。
 
-**双击 `install.bat`**。
-
-它是装 Python 包的，跑完窗口会停住等你按键。以后不用再跑。
-
-> 前提：机器上有 Python 3.10 或更新版本。
-> 没有就去 [python.org](https://www.python.org/downloads/) 装一个，
-> 安装时记得勾上 **Add python.exe to PATH**。
+（`python\` 那个目录就是自带的 Python，别删。删了它也不会立刻坏，
+但会退回去找你系统里装的 Python —— 那样就得自己 `pip install` 了。）
 
 ---
 
