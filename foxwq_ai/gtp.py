@@ -207,16 +207,28 @@ class KataGoGtp:
 
     # ---------------- 对局同步 ----------------
     def _move_list(self, stones, player):
-        """把盘面变成 GTP 着法列表（顺序固定，保证同一局面得到同一列表）。"""
+        """把盘面变成 GTP 着法列表。
+
+        **必须黑白交替**。GTP 的 `play B D4` 要求此刻正轮到黑，颜色不对引擎直接
+        不认（也不报错，就当没发）。之前这里是按棋盘坐标一行行扫、扫到谁记谁，
+        于是经常连着两个 "B"，之后引擎算的一直是那个旧局面 ——
+        屏幕上就是"落子了但选点不动"，而且日志里完全看不出来，非常隐蔽。
+        """
         n = self.cfg["board_size"]
-        out = []
+        blacks, whites = [], []
         for j in range(n):
             for i in range(n):
                 v = stones[j, i]
                 if v == 1:
-                    out.append(("B", xy_to_gtp(i, j, n)))
+                    blacks.append(xy_to_gtp(i, j, n))
                 elif v == 2:
-                    out.append(("W", xy_to_gtp(i, j, n)))
+                    whites.append(xy_to_gtp(i, j, n))
+        out = []
+        for k in range(max(len(blacks), len(whites))):
+            if k < len(blacks):
+                out.append(("B", blacks[k]))
+            if k < len(whites):
+                out.append(("W", whites[k]))
         return out
 
     def sync_board(self, stones, player):
@@ -232,14 +244,19 @@ class KataGoGtp:
             self._board = []
             cur_set = set()
         extra = [x for x in target if x not in cur_set]
-        if extra:
+        changed = bool(extra) or bool(missing)
+        for color, mv in extra:
+            self._send(f"play {color} {mv}")
+            self._board.append((color, mv))
+        if changed:
             # 局面变了，旧候选全部作废（不然会显示上一手的点）
             with self._lock:
                 self._cands = []
                 self._gen += 1
-        for color, mv in extra:
-            self._send(f"play {color} {mv}")
-            self._board.append((color, mv))
+            # **必须重发一次 kata-analyze**：`clear_board` 会把正在跑的持续分析打断，
+            # 之后引擎一声不吭，界面就永远停在旧点上。这一句是"落子后能刷新"的关键。
+            if self._analyzing:
+                self._send("kata-analyze 5 maxmoves 8")
         return len(extra)
 
     def begin_analyze(self):

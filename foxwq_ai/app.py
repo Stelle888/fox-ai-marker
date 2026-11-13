@@ -71,6 +71,8 @@ class FoxAdvisor(QObject):
         self._last_change = 0.0
         self._last_sig = None
         self._last_gen = -1
+        self._reject_n = 0
+        self._reject_sig = None
         self._engine_inited = False
         self._synced = False
         self._log_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "fox-ai.log")
@@ -348,6 +350,22 @@ class FoxAdvisor(QObject):
         nb = int((stones == 1).sum())
         nw = int((stones == 2).sum())
         prev_n = -1 if self.last_stones is None else int((self.last_stones > 0).sum())
+
+        # 突变过滤：野狐的大厅、房间列表、复盘列表偶尔会被误认成棋盘，
+        # 一帧冒出二十几颗子，下一帧又回到 0。这种大幅跳变先不信；
+        # 但"换了对局/回到大厅"也是大幅跳变，所以它连续 8 帧（约 0.6 秒）
+        # 保持同一副样子的话就说明是真的，照样接受。
+        if self.last_stones is not None and abs((nb + nw) - prev_n) >= 9:
+            if self._reject_sig is not None and np.array_equal(sig, self._reject_sig):
+                self._reject_n += 1
+            else:
+                self._reject_sig = sig
+                self._reject_n = 1
+            if self._reject_n < 8:
+                self._trace(f"丢弃突变帧: {prev_n} -> {nb + nw} 子（第 {self._reject_n} 次）")
+                return False
+        self._reject_n = 0
+        self._reject_sig = None
 
         if self.last_stones is not None:
             added = sig & ~self._last_sig
