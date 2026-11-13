@@ -71,6 +71,7 @@ class FoxAdvisor(QObject):
         self._last_change = 0.0
         self._last_sig = None
         self._last_gen = -1
+        self._cand_fresh = False
         self._reject_n = 0
         self._reject_sig = None
         self._engine_inited = False
@@ -155,6 +156,7 @@ class FoxAdvisor(QObject):
         self._current_state = None
         self._last_cands = []
         self._grid = None
+        self._cand_fresh = False
         self._last_gen = -1
         self.phys_rect = None
 
@@ -322,6 +324,10 @@ class FoxAdvisor(QObject):
             if self.engine.ready:
                 self._synced = True
             if n_add:
+                # 局面换了，这一手的点还没画过。门槛回到"1 visit 就画"，
+                # 否则新结果前十几个 visit 全被稳定门槛挡着，
+                # 屏幕上就一直是上一手的点 —— 表现就是"落子了但选点不动"。
+                self._cand_fresh = False
                 self.status = f"分析中…（{'黑' if self._next_player() == 'B' else '白'}方）"
 
         cands, gen, _wr = self.engine.latest()
@@ -404,7 +410,9 @@ class FoxAdvisor(QObject):
         if not cands:
             return
         cands.sort(key=lambda c: -c.visits)
-        need = 1 if not self._last_cands else SETTLE_VISITS
+        # 这一手还没画过点 → 再浅也先画出来，让你落子立刻看见东西；
+        # 已经画过一次 → 要求攒够 SETTLE_VISITS 才换位置，不然会乱闪。
+        need = SETTLE_VISITS if self._cand_fresh else 1
         if cands[0].visits < need:
             return
         chosen = choose_candidates(
@@ -419,6 +427,7 @@ class FoxAdvisor(QObject):
             label = f"{c.winrate * 100:.1f}"
             out.append((c.i, c.j, color, label))
         # 位置和顺序都没变就什么都不做 —— 重画一次也看不出区别，只会闪。
+        self._cand_fresh = True
         if out and [x[:2] for x in out] == [x[:2] for x in self._last_cands]:
             # 但数字（胜率）还是要更新，不然显示会僵在落子那一刻
             self._last_cands = out
