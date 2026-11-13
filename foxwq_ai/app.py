@@ -378,7 +378,7 @@ class FoxAdvisor(QObject):
     def _pick_candidates(self, cands_list):
         # GTP 持续分析给的候选是"按 move 累积"的，只有一个 visit 的先不画，
         # 免得刚发 `play` 那一瞬间拿搜索树里还没站稳的点去闪一下。
-        cands = [c for c in cands_list if c.visits >= 2]
+        cands = [c for c in cands_list if c.visits >= 1]
         if not cands:
             return
         cands.sort(key=lambda c: -c.visits)

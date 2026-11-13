@@ -60,7 +60,7 @@ DEFAULTS = {
     # ---------- 野狐窗口 ----------
     "window_title_keywords": ["野狐", "foxwq", "FoxGo", "围棋", "Fox"],
     "window_process": "foxwq.exe",
-    "capture_interval_ms": 150,   # 多久看一次棋盘
+    "capture_interval_ms": 80,   # 多久看一次棋盘
     "auto_calibrate": True,       # 自动找棋盘；失败时用手动 calibrate 值
 
     # ---------- 棋盘识别 ----------
