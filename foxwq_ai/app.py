@@ -76,6 +76,7 @@ class FoxAdvisor(QObject):
         self._reject_sig = None
         self._pending_sig = None
         self._pending_n = 0
+        self._pending_t = 0.0
         self._engine_inited = False
         self._synced = False
         self._log_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "fox-ai.log")
@@ -154,6 +155,7 @@ class FoxAdvisor(QObject):
         self._pending = None
         self._pending_n = 0
         self._pending_sig = None
+        self._pending_t = 0.0
         self._current_rid = None
         self._analyzed_stones = None
         self._current_state = None
@@ -359,6 +361,7 @@ class FoxAdvisor(QObject):
             # 待确认状态会一直挂着，等真落子时被当成"已经看了两帧"直接放行。
             self._pending_sig = None
             self._pending_n = 0
+            self._pending_t = 0.0
             return False
 
         nb = int((stones == 1).sum())
@@ -367,19 +370,25 @@ class FoxAdvisor(QObject):
 
         # 鼠标悬停在棋盘上时，野狐会画一个半透明的预览棋子。
         # 它会被识别成"多了一颗子"，于是选点莫名其妙地重算一遍。
-        # 预览跟着鼠标走，不会连续两帧停在同一处；真落子则会稳住。
-        # 所以新出现的子必须连续两帧都还在才算数（约 160ms）。
+        #
+        # 做法照艾姆西的 `BoardSyncTool.verifyMove`：
+        #     Thread.sleep(200);
+        #     return new BoardOCR().hasMoveAt(...);
+        # 也就是"先等 200ms，再确认那颗子还在不在"。预览跟着鼠标走，
+        # 撑不过 200ms；真落子会稳稳待在那儿。
+        #
+        # 差别在于它是自动落子工具，知道点了哪里，可以只验那一点；
+        # 我们只读屏幕，只能整盘比对，所以用"整盘签名 200ms 内不变"代替。
         if self.last_stones is not None and (nb + nw) > prev_n:
+            now = time.time()
             if self._pending_sig is not None and np.array_equal(sig, self._pending_sig):
-                self._pending_n += 1
+                if now - self._pending_t < 0.20:
+                    return False
             else:
                 # 必须 copy：sig 是每帧复用同一块内存的布尔数组，
-                # 直接存引用的话它下一帧就被改写了，比较永远相等，
-                # 等于这层过滤根本不存在。
+                # 存引用的话它下一帧就被改写，比较永远相等，等于没这层过滤。
                 self._pending_sig = sig.copy()
-                self._pending_n = 1
-            if self._pending_n < 2:
-                self._trace(f"疑似鼠标预览（{prev_n} -> {nb + nw} 子，第 {self._pending_n} 帧），再等等")
+                self._pending_t = now
                 return False
         self._pending_sig = None
         self._pending_n = 0
