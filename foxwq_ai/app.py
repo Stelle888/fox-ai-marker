@@ -314,7 +314,7 @@ class FoxAdvisor(QObject):
         # 所以 setup / 开持续分析 / 首次同步都压到"确认 ready"这一刻做。
         if self.engine.ready and not self._engine_inited:
             self.engine.setup(self.cfg["komi"], self.cfg["rules"])
-            self.engine.begin_analyze()
+            self.engine.begin_analyze(self._next_player())
             self._engine_inited = True
             self._synced = False
             self._trace("引擎就绪，开始持续分析")

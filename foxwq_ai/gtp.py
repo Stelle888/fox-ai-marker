@@ -35,6 +35,7 @@ class KataGoGtp:
         self._gen = 0          # 每收到一批新分析结果就 +1
         self._board = []       # 引擎里当前的着法列表 [(color, move)]
         self._analyzing = False
+        self._analyze_color = "b"
         self._stderr_tail = []
 
     # ---------------- 生命周期 ----------------
@@ -260,19 +261,27 @@ class KataGoGtp:
             with self._lock:
                 self._cands = []
                 self._gen += 1
-        # **每发一次 play 都要重发 kata-analyze**。实测 `play` 会让持续分析彻底
-        # 停下来（之后一条 info 都收不到），不重发就永远不再更新。
-        # 代价是搜索树从零开始，MX250 上要 5~10 秒才把三个候选攒齐 ——
-        # 这是硬件下限，不是命令写错了。
+        # 用 kata-analyze（多候选）代价就是：play 会打断它，必须重发，
+        # 重发后搜索从零开始。kata-genmove_analyze 倒是能接着算，
+        # 但它一次只报 1 个候选 —— 你要三个点，就只能选前者。
         if (extra or rebuilt) and self._analyzing:
             self._send("kata-analyze 10 maxmoves 8")
         return len(extra)
 
-    def begin_analyze(self):
-        """开持续分析。interval 的单位是**厘秒**（5 = 50ms），别当成毫秒。"""
+    def begin_analyze(self, player="B"):
+        """开持续分析。
+
+        用 `kata-genmove_analyze` 而不是 `kata-analyze`：前者是 Leela 系那种
+        "边分析边给出着法"的持续模式，`play` 不会打断它，搜索树直接复用。
+        后者一被 `play` 打断就永远沉默，只能重发，重发又得从零开始。
+
+        interval 单位是**厘秒**（10 = 100ms），和艾姆西的
+        analyze-update-interval-centisec: 10 一致。
+        """
         if self._analyzing:
             return
         self._analyzing = True
+        self._analyze_color = (player or "B").lower()
         self._send("kata-analyze 10 maxmoves 8")
 
     def end_analyze(self):
