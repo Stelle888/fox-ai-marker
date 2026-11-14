@@ -74,6 +74,8 @@ class FoxAdvisor(QObject):
         self._cand_fresh = False
         self._reject_n = 0
         self._reject_sig = None
+        self._pending_sig = None
+        self._pending_n = 0
         self._engine_inited = False
         self._synced = False
         self._log_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "fox-ai.log")
@@ -151,6 +153,7 @@ class FoxAdvisor(QObject):
         self.last_stones = None
         self._pending = None
         self._pending_n = 0
+        self._pending_sig = None
         self._current_rid = None
         self._analyzed_stones = None
         self._current_state = None
@@ -351,11 +354,35 @@ class FoxAdvisor(QObject):
         """
         sig = stones > 0
         if self.last_stones is not None and np.array_equal(sig, self._last_sig):
+            # 和上一帧一模一样 —— 没有新东西。顺手把"待确认"清掉：
+            # 鼠标预览挪走后画面会回到原样，这里如果不清，预览留下的
+            # 待确认状态会一直挂着，等真落子时被当成"已经看了两帧"直接放行。
+            self._pending_sig = None
+            self._pending_n = 0
             return False
 
         nb = int((stones == 1).sum())
         nw = int((stones == 2).sum())
         prev_n = -1 if self.last_stones is None else int((self.last_stones > 0).sum())
+
+        # 鼠标悬停在棋盘上时，野狐会画一个半透明的预览棋子。
+        # 它会被识别成"多了一颗子"，于是选点莫名其妙地重算一遍。
+        # 预览跟着鼠标走，不会连续两帧停在同一处；真落子则会稳住。
+        # 所以新出现的子必须连续两帧都还在才算数（约 160ms）。
+        if self.last_stones is not None and (nb + nw) > prev_n:
+            if self._pending_sig is not None and np.array_equal(sig, self._pending_sig):
+                self._pending_n += 1
+            else:
+                # 必须 copy：sig 是每帧复用同一块内存的布尔数组，
+                # 直接存引用的话它下一帧就被改写了，比较永远相等，
+                # 等于这层过滤根本不存在。
+                self._pending_sig = sig.copy()
+                self._pending_n = 1
+            if self._pending_n < 2:
+                self._trace(f"疑似鼠标预览（{prev_n} -> {nb + nw} 子，第 {self._pending_n} 帧），再等等")
+                return False
+        self._pending_sig = None
+        self._pending_n = 0
 
         # 突变过滤：野狐的大厅、房间列表、复盘列表偶尔会被误认成棋盘，
         # 一帧冒出二十几颗子，下一帧又回到 0。这种大幅跳变先不信；
@@ -365,7 +392,7 @@ class FoxAdvisor(QObject):
             if self._reject_sig is not None and np.array_equal(sig, self._reject_sig):
                 self._reject_n += 1
             else:
-                self._reject_sig = sig
+                self._reject_sig = sig.copy()
                 self._reject_n = 1
             if self._reject_n < 8:
                 self._trace(f"丢弃突变帧: {prev_n} -> {nb + nw} 子（第 {self._reject_n} 次）")
