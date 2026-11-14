@@ -22,7 +22,11 @@ def _pick_exe():
 
 
 def _pick_model():
-    """优先用项目自带的 weights/*.bin.gz（b20 优先：够强又快），找不到才回落。"""
+    """挑权重：tf3 > b28 > b20 > 任意。越靠前越强、越吃显存。
+
+    注意 tf3 格式需要 KataGo v1.17+（自带的是 v1.18.1）；
+    旧引擎会直接报 "network format not supported" 退出。
+    """
     wdir = os.path.join(_ROOT, "weights")
     if os.path.isdir(wdir):
         bins = sorted(
@@ -30,8 +34,10 @@ def _pick_model():
             for f in os.listdir(wdir)
             if f.lower().endswith(".bin.gz")
         )
+        # 只留 b18：它在 MX250 上快得多（8 秒能算 400+ visits，
+        # tf3/b28 只有几十），棋力是你实际下过之后认可的那个。
         for b in bins:
-            if "b20" in os.path.basename(b).lower():
+            if "b18" in os.path.basename(b).lower():
                 return b
         if bins:
             return bins[0]
